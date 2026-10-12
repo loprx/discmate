@@ -12,7 +12,14 @@ struct DiscMateApp: App {
             ContentView()
                 .frame(minWidth: 700, minHeight: 500)
         }
-        .commands { CommandGroup(replacing: .newItem) { } }
+        .commands {
+            CommandGroup(replacing: .newItem) { }
+            DiscMateHelpCommands()
+        }
+        Window("DiscMate 使用帮助", id: "discmate-help") {
+            DiscMateHelpView()
+                .frame(minWidth: 560, minHeight: 440)
+        }
     }
 }
 

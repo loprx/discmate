@@ -12,6 +12,8 @@ brew install --cask loprx/tap/discmate
 
 The package comes from the project's own [Homebrew tap](https://github.com/loprx/homebrew-tap), not Homebrew's official cask repository. macOS may require approving the first launch in System Settings → Privacy & Security → Open Anyway.
 
+Open the app's Help menu and choose “DiscMate 使用帮助” for the current burn and append workflow.
+
 ## Status
 
 Developer preview. This source tree has passed local arm64 builds and offline ISO tests. One test DVD+R has passed several incremental sessions; the newest added file was read back from the latest mounted session. Automatic eject has shown an intermittent failure, and the fallback path after a burn still needs hardware validation. Other disc types and operating systems are outside the tested support range. The latest-session mount helper currently uses a deprecated authorization API, so future macOS compatibility needs further work.
