@@ -13,6 +13,7 @@ brew install --cask loprx/tap/discmate
 The package comes from the project's own [Homebrew tap](https://github.com/loprx/homebrew-tap), not Homebrew's official cask repository. macOS may require approving the first launch in System Settings → Privacy & Security → Open Anyway.
 
 Open the app's Help menu and choose “DiscMate 使用帮助” for the current burn and append workflow.
+Adding files refreshes the current disc state once, so an already inserted data disc shows the append review control without a separate manual refresh.
 
 ## Status
 

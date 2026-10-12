@@ -252,6 +252,8 @@ struct ContentView: View {
     }
     private func refresh() {
         guard !isRefreshing, !sessions.blocksDeviceOperations, activeBurn == nil, activeErase == nil else { return }
+        let selectedPath = driveRegistryPaths.indices.contains(selectedDrive) ? driveRegistryPaths[selectedDrive] : nil
+        let selectedBSD = driveBSDNames.indices.contains(selectedDrive) ? driveBSDNames[selectedDrive] : nil
         isRefreshing = true; sessions.reset()
         status = "正在等待系统识别刻录设备…"
         refreshWarning = Task { @MainActor in
@@ -275,7 +277,14 @@ struct ContentView: View {
             drives = result.devices; driveDescriptions = result.descriptions; driveBSDNames = result.bsdNames
             driveRegistryPaths = result.registryPaths
             driveNames = result.names; mediaPresent = result.present; mediaBlank = result.blank
-            selectedDrive = 0; isRefreshing = false
+            if let selectedPath, let index = result.registryPaths.firstIndex(where: { $0 == selectedPath }) {
+                selectedDrive = index
+            } else if let selectedBSD, let index = result.bsdNames.firstIndex(where: { $0 == selectedBSD }) {
+                selectedDrive = index
+            } else {
+                selectedDrive = 0
+            }
+            isRefreshing = false
             refreshWarning?.cancel(); refreshWarning = nil
             updateSelection()
             status = drives.isEmpty ? "未检测到刻录机。" : "已检测到 \(drives.count) 台刻录机。"
@@ -303,6 +312,9 @@ struct ContentView: View {
                     filesByJob[job, default: []].append(url)
                 }
             }
+            // The disc can be inserted while the file chooser is open. Refresh
+            // once after selection so the append controls reflect current media.
+            if job == .data { refresh() }
         }
     }
 
