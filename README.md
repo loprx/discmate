@@ -2,6 +2,16 @@
 
 DiscMate is a free macOS optical disc burning prototype for Apple Silicon. Its tested incremental data workflow targets DVD+R with a flat ISO 9660/Joliet directory. The app can add files in a later session while referencing existing file extents, so an old large file does not need to be copied into each new session.
 
+## Install
+
+On Apple Silicon with macOS 13 or later:
+
+```sh
+brew install --cask loprx/tap/discmate
+```
+
+The package comes from the project's own [Homebrew tap](https://github.com/loprx/homebrew-tap), not Homebrew's official cask repository. macOS may require approving the first launch in System Settings → Privacy & Security → Open Anyway.
+
 ## Status
 
 Developer preview. This source tree has passed local arm64 builds and offline ISO tests. One test DVD+R has passed several incremental sessions; the newest added file was read back from the latest mounted session. Automatic eject has shown an intermittent failure, and the fallback path after a burn still needs hardware validation. Other disc types and operating systems are outside the tested support range. The latest-session mount helper currently uses a deprecated authorization API, so future macOS compatibility needs further work.
