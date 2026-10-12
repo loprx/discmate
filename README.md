@@ -1,45 +1,52 @@
 # DiscMate
 
-DiscMate is a free macOS optical disc burning prototype for Apple Silicon. Its tested incremental data workflow targets DVD+R with a flat ISO 9660/Joliet directory. The app can add files in a later session while referencing existing file extents, so an old large file does not need to be copied into each new session.
+DiscMate 是面向 Apple Silicon Mac 的免费光盘刻录工具。核心功能是在仍可追加的数据 DVD+R 上加入新文件，让新旧文件都能从最新会话读取。软件仍处于预览阶段；下文把已验证范围和限制写清楚。
 
-## Install
+## 安装与更新
 
-On Apple Silicon with macOS 13 or later:
+需要 Apple Silicon、macOS 13 或更新版本，以及外接或内置刻录机。通过本项目自己的 [Homebrew tap](https://github.com/loprx/homebrew-tap) 安装：
 
 ```sh
 brew install --cask loprx/tap/discmate
 ```
 
-The package comes from the project's own [Homebrew tap](https://github.com/loprx/homebrew-tap), not Homebrew's official cask repository. macOS may require approving the first launch in System Settings → Privacy & Security → Open Anyway.
+更新已安装版本：
 
-Open the app's Help menu and choose “DiscMate 使用帮助” for the current burn and append workflow.
-Adding files refreshes the current disc state once, so an already inserted data disc shows the append review control without a separate manual refresh.
-The “Keep appendable” setting appears only for an identified blank disc; an existing data disc instead offers append review.
+```sh
+brew update
+brew upgrade --cask loprx/tap/discmate
+```
 
-## Status
+当前下载包采用 ad hoc 签名，没有经过 Apple 公证。首次打开若出现“Apple 无法验证”提示，请在确认下载来源可信后，按 [Apple 的单应用放行步骤](https://support.apple.com/102445) 到「系统设置 → 隐私与安全性 → 仍要打开」操作。无需全局关闭 Gatekeeper，也不要用命令移除隔离标记。
 
-Developer preview. This source tree has passed local arm64 builds and offline ISO tests. One test DVD+R has passed several incremental sessions; the newest added file was read back from the latest mounted session. Automatic eject has shown an intermittent failure, and the fallback path after a burn still needs hardware validation. Other disc types and operating systems are outside the tested support range. The latest-session mount helper currently uses a deprecated authorization API, so future macOS compatibility needs further work.
+## 数据光盘怎么用
 
-## Build from source
+**首次刻录空白盘：**放入光盘并点击「刷新设备」，确认界面显示空白盘；添加文件，按需勾选「保留后续追加能力」，再点击「开始刻录」。这个选项只在识别到空白盘时出现。
 
-Requires macOS 13 or later, Apple Silicon, Xcode Command Line Tools and `hdiutil`. No third-party burning backend is required.
+**向已有数据盘追加：**放入仍可追加的盘，选择文件后软件会刷新一次设备状态。界面显示「已有数据光盘」时，点击「查看追加摘要」，检查文件和空间，再点击「开始追加」。旧文件无需重新添加；新增文件不能与旧文件重名。写入、系统校验及收尾期间保持光驱连接和供电，不要强行退出。
+
+**完成后读取：**写入任务结束并不等于独立读回完成。重新合仓并刷新设备；如果访达仍显示旧会话，点击「在访达打开最新内容」，按提示授权只读挂载。需要核对内容时，可在「可选：读回校验」中只校验本次新增文件，或完整读取所有文件。完整读取大盘会明显更久。
+
+菜单栏「帮助 → DiscMate 使用帮助」包含上述操作和常见故障处理。盘上已有文件会以可滚动列表显示名称、类型、大小和所在会话；读取这些目录元数据无需扫描旧文件正文。
+
+## 已验证范围与限制
+
+- 已实盘验证：数据 DVD+R、ISO 9660/Joliet、根目录普通文件的多次追加和读回；增量追加会引用旧文件区段，而不是重新写入旧文件正文。
+- 单个新增文件及新会话镜像均须小于 4 GiB；当前不支持文件夹追加或覆盖同名文件。
+- 默认的访达挂载可能选择较早会话，因此应用提供「在访达打开最新内容」。重新插盘后如需最新会话，仍须由应用重新识别和打开。
+- 自动收尾/弹出曾出现不稳定，仍在实盘验证；应以介质实际推出和重新读回判断结果，不能只看刻录 API 的“完成”。
+- CD、其他 DVD 类型、蓝光和其他文件系统未完成同等实盘验证。其他刻录入口使用 macOS DiscRecording，但不能据此视作已验证的追加能力。
+- 最新会话的只读挂载助手目前使用已弃用的授权 API，未来 macOS 版本的兼容性需要继续处理。
+
+请先用可消耗的测试盘试用，重要资料应另有备份。[发布版本与校验值](https://github.com/loprx/discmate/releases)可在 GitHub Releases 查看。
+
+## 从源码构建
+
+需要 Xcode Command Line Tools 和 macOS 自带的 `hdiutil`。构建与离线测试不会写入光盘：
 
 ```sh
 zsh test.sh
 zsh build.sh
 ```
 
-The result is `build/DiscMate.app`. Building and testing do not write to a disc. Actual burning requires a selected optical drive and a disc in the app. The default build is ad hoc signed. If macOS blocks first launch of a downloaded copy, approve it in System Settings → Privacy & Security → Open Anyway.
-
-## Current data append limits
-
-- DVD+R with ISO 9660/Joliet and ordinary files in the root directory.
-- Each file and the new session image must be under 4 GiB.
-- No folder append, overwrite of an existing name, or promise that Finder automatically selects the newest session.
-- Standard append checks old directory and extents, but does not reread every byte of old files. New-file and full-disc readback are separate actions.
-
-Other controls use macOS DiscRecording, but have not all received equivalent real-disc validation. Contributions and reproducible reports are welcome.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+产物位于 `build/DiscMate.app`。源代码采用 [MIT 许可证](LICENSE)。
