@@ -65,6 +65,43 @@ int dm_media(const char *bsd, DMMedia *out) {
     IOObjectRelease(media);
     return error;
 }
+// Recovery checks identity for any optical medium, without opening its BSD node.
+// Partitions are ignored; ambiguous/partial registry trees fail closed.
+int dm_registry_recovery_state(const char *path, uint64_t *driveID, uint64_t *mediaID, char *bsd, size_t capacity) {
+    if (!capacity) return EINVAL;
+    *driveID = 0; *mediaID = 0; bsd[0] = '\0';
+    io_registry_entry_t drive = IORegistryEntryFromPath(kIOMainPortDefault, path);
+    if (!drive) return ENXIO;
+    io_iterator_t iterator = IO_OBJECT_NULL;
+    if (IORegistryEntryGetRegistryEntryID(drive, driveID) != KERN_SUCCESS ||
+        IORegistryEntryCreateIterator(drive, kIOServicePlane, kIORegistryIterateRecursively, &iterator) != KERN_SUCCESS) {
+        IOObjectRelease(drive); return EIO;
+    }
+    IOObjectRelease(drive);
+    io_object_t child; int wholeCount = 0, mediaCount = 0, error = 0;
+    while ((child = IOIteratorNext(iterator))) {
+        if (IOObjectConformsTo(child, "IOMedia")) {
+            ++mediaCount;
+            CFTypeRef whole = IORegistryEntryCreateCFProperty(child, CFSTR("Whole"), kCFAllocatorDefault, 0);
+            if (!whole || CFGetTypeID(whole) != CFBooleanGetTypeID()) error = EAGAIN;
+            else if (CFBooleanGetValue((CFBooleanRef)whole)) {
+                ++wholeCount;
+                CFTypeRef name = IORegistryEntryCreateCFProperty(child, CFSTR("BSD Name"), kCFAllocatorDefault, 0);
+                if (!name || CFGetTypeID(name) != CFStringGetTypeID() ||
+                    !CFStringGetCString((CFStringRef)name, bsd, capacity, kCFStringEncodingUTF8) ||
+                    IORegistryEntryGetRegistryEntryID(child, mediaID) != KERN_SUCCESS) error = EAGAIN;
+                if (name) CFRelease(name);
+            }
+            if (whole) CFRelease(whole);
+        }
+        IOObjectRelease(child);
+    }
+    if (!IOIteratorIsValid(iterator) || wholeCount > 1 || (mediaCount > 0 && wholeCount != 1)) error = EAGAIN;
+    IOObjectRelease(iterator);
+    uint64_t current = 0;
+    if (dm_registry_identity(path, &current) || current != *driveID) error = EAGAIN;
+    return error;
+}
 int dm_registry_media(const char *path, uint64_t driveID, char *bsd, size_t capacity, DMMedia *out) {
     io_registry_entry_t drive = IORegistryEntryFromPath(kIOMainPortDefault, path);
     if (!drive) return ENXIO;

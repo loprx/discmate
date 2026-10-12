@@ -38,6 +38,7 @@ private final class DiscBurnWorker: NSObject {
     private var warned = false
     private var backendResourcesReleased = false
     private var lastRegistryMedia: String?
+    private var queriedRestoredStatus = false
 
     enum Event {
         case progress(BurnProgress)
@@ -72,6 +73,7 @@ private final class DiscBurnWorker: NSObject {
                 center.removeObserver(self, name: NSNotification.Name.DRBurnStatusChanged.rawValue, object: burn)
                 center.removeObserver(self, name: NSNotification.Name.DRDeviceStatusChanged.rawValue, object: device)
                 center.removeObserver(self, name: NSNotification.Name.DRDeviceDisappeared.rawValue, object: nil)
+                center.removeObserver(self, name: NSNotification.Name.DRDeviceAppeared.rawValue, object: nil)
             }
             track = nil; burn = nil; device = nil; center = nil
         }
@@ -152,6 +154,7 @@ private final class DiscBurnWorker: NSObject {
         center.addObserver(self, selector: #selector(burnChanged(_:)), name: NSNotification.Name.DRBurnStatusChanged.rawValue, object: burn)
         center.addObserver(self, selector: #selector(deviceChanged(_:)), name: NSNotification.Name.DRDeviceStatusChanged.rawValue, object: device)
         center.addObserver(self, selector: #selector(deviceGone(_:)), name: NSNotification.Name.DRDeviceDisappeared.rawValue, object: nil)
+        center.addObserver(self, selector: #selector(deviceAppeared(_:)), name: NSNotification.Name.DRDeviceAppeared.rawValue, object: nil)
         try fresh.identity.validate()
         started = true
         emit(.backend, state: "Starting", detail: "后台线程开始刻录；通过系统通知接收进度。deviceRegistryID=\(deviceRegistryID)")
@@ -178,6 +181,15 @@ private final class DiscBurnWorker: NSObject {
 
     @objc private func deviceChanged(_ note: Notification) {
         guard started, let notified = note.object as? DRDevice, notified === device, let info = note.userInfo else { return }
+        var current: UInt64 = 0
+        guard dm_registry_identity(devicePath, &current) == 0, current == deviceRegistryID else {
+            completion.observationUnavailable(); queriedRestoredStatus = false
+            return
+        }
+        acceptDeviceStatus(info)
+    }
+
+    private func acceptDeviceStatus(_ info: [AnyHashable: Any]) {
         let media = info[DRDeviceMediaStateKey] as? String
         let busy = (info[DRDeviceIsBusyKey] as? NSNumber)?.boolValue
         let tray = (info[DRDeviceIsTrayOpenKey] as? NSNumber)?.boolValue
@@ -189,7 +201,35 @@ private final class DiscBurnWorker: NSObject {
     @objc private func deviceGone(_ note: Notification) {
         guard let notified = note.object as? DRDevice, notified === device else { return }
         completion.deviceDisconnected()
-        emit(.warning, state: "Disconnected", detail: "刻录设备已断开，等待后端结束通知；不会自动重试。")
+        queriedRestoredStatus = false
+        emit(.warning, state: "DeviceUnavailable", detail: completion.terminal == .done
+             ? "系统写入及校验已完成，设备状态暂不可用；正在等待同一光驱重新确认，不会重复刻录。"
+             : "收到设备不可用通知，继续等待后端结束；不会自动重试刻录。")
+    }
+
+    @objc private func deviceAppeared(_ note: Notification) {
+        // Rebind only after the backend has ended and only to the SAME registry
+        // entry. A USB reconnect/new drive must use explicit recovery instead.
+        guard started, completion.canRefreshStatus(at: ProcessInfo.processInfo.systemUptime),
+              let notified = note.object as? DRDevice,
+              notified.ioRegistryEntryPath() == devicePath,
+              notified !== device || completion.disconnected else { return }
+        var current: UInt64 = 0
+        guard dm_registry_identity(devicePath, &current) == 0, current == deviceRegistryID else {
+            completion.observationUnavailable(); queriedRestoredStatus = false
+            return
+        }
+        center?.removeObserver(self, name: NSNotification.Name.DRDeviceStatusChanged.rawValue, object: device)
+        device = notified
+        completion.observationUnavailable()
+        queriedRestoredStatus = true
+        center?.addObserver(self, selector: #selector(deviceChanged(_:)), name: NSNotification.Name.DRDeviceStatusChanged.rawValue, object: notified)
+        // A single read-only status query on the owned worker, not the main UI.
+        // If it blocks, task ownership remains held; no timeout cancels it.
+        let status = notified.status() ?? [:]
+        guard dm_registry_identity(devicePath, &current) == 0, current == deviceRegistryID else { return }
+        acceptDeviceStatus(status)
+        emit(.device, state: "SameDeviceReturned", detail: "原光驱身份重新确认；重新观察结束状态，不沿用此前的空仓计时。")
     }
 
     private func tick() {
@@ -205,13 +245,35 @@ private final class DiscBurnWorker: NSObject {
                 emit(.device, state: "BackendReleased", detail: "已释放本任务的刻录对象和轨道引用；继续等待设备结束确认。")
             }
             var current: UInt64 = 0
-            let registered = dm_registry_identity(devicePath, &current) == 0 && current == deviceRegistryID
+            let identityStatus = dm_registry_identity(devicePath, &current)
             var present: Int32 = -1
             let registryStatus = dm_registry_has_media(devicePath, &present)
-            let registryText = registryStatus == 0 ? "present=\(present)" : "queryError=\(registryStatus)"
+            var after: UInt64 = 0
+            let afterStatus = dm_registry_identity(devicePath, &after)
+            let registered = identityStatus == 0 && afterStatus == 0 && current == deviceRegistryID && after == deviceRegistryID
+            let registryText = "expectedDrive=\(deviceRegistryID) before=\(current)/\(identityStatus) after=\(after)/\(afterStatus) " + (registryStatus == 0 ? "present=\(present)" : "queryError=\(registryStatus)")
             if registryText != lastRegistryMedia {
                 emit(.device, state: "RegistryMedia", detail: "结束后注册表介质 \(registryText)")
                 lastRegistryMedia = registryText
+            }
+            if !registered && !completion.disconnected {
+                emit(.warning, state: "DeviceIdentityPending", detail: "系统刻录任务已结束，暂时无法核对原光驱身份；继续等待状态恢复，尚不能确认推出。")
+            }
+            if !registered { queriedRestoredStatus = false }
+            if registered, completion.disconnected, completion.canRefreshStatus(at: now),
+               !queriedRestoredStatus, let device, device.isValid() {
+                // One query when the original registry entry returns. This also
+                // handles a transient registry failure with no new DR event.
+                queriedRestoredStatus = true
+                let status = device.status() ?? [:]
+                var confirmed: UInt64 = 0
+                if dm_registry_identity(devicePath, &confirmed) == 0, confirmed == deviceRegistryID {
+                    acceptDeviceStatus(status)
+                    emit(.device, state: "SameDeviceStatusRefreshed", detail: "原光驱身份恢复，已重新读取一次结束状态；重新累计稳定观察。")
+                }
+                // Never combine the fresh status with registry media observed
+                // before that query, nor count a blocked query as settling time.
+                return
             }
             result = completion.outcome(at: now, driveStillRegistered: registered,
                                         registryMediaAbsent: registryStatus == 0 ? present == 0 : nil)

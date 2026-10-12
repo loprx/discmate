@@ -77,6 +77,9 @@ struct ContentView: View {
     private var locked: Bool {
         isRefreshing || sessions.blocksDeviceOperations || activeBurn != nil || activeErase != nil
     }
+    private var deviceTaskActive: Bool {
+        isRefreshing || sessions.isBusy || activeBurn != nil || activeErase != nil
+    }
     private var selectedMediaPresent: Bool {
         mediaPresent.indices.contains(selectedDrive) && mediaPresent[selectedDrive]
     }
@@ -115,10 +118,31 @@ struct ContentView: View {
                                 Text(driveNames.indices.contains(index) ? driveNames[index] : "刻录机 \(index + 1)").tag(index)
                             }
                         }
-                    }
-                    Button(isRefreshing ? "正在识别…" : "刷新设备") { refresh() }
+                    }.disabled(locked)
+                    Button(isRefreshing ? "正在识别…" : sessions.needsDeviceRecovery ? "重新检查设备" : "刷新设备") { refresh() }
+                        .disabled(deviceTaskActive)
                         .help("换盘、合仓或重连后更新设备状态，通常数秒；不刻录。若系统仍在处理，请等待，不要反复点击。")
-                }.disabled(locked).onChange(of: selectedDrive) { _ in updateSelection() }
+                }.onChange(of: selectedDrive) { _ in updateSelection() }
+                if sessions.needsDeviceRecovery {
+                    if !sessions.recoveryTargets.isEmpty {
+                        Picker("恢复目标", selection: $sessions.recoveryTargetPath) {
+                            Text("请选择光驱").tag(Optional<String>.none)
+                            ForEach(sessions.recoveryTargets, id: \.path) { target in
+                                Text(target.name).tag(Optional(target.path))
+                            }
+                        }.disabled(deviceTaskActive)
+                    }
+                    Text(sessions.message + (sessions.isBusy ? "" : " 可点击“重新检查设备”；写入仍暂停。"))
+                        .font(.callout).foregroundStyle(.orange)
+                } else if isRefreshing {
+                    Text(status).font(.callout).foregroundStyle(.secondary)
+                } else if sessions.isBusy {
+                    Text("设备正由当前任务使用：\(sessions.message) 刷新将在任务结束后恢复。")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                if let recoveryNotice = sessions.recoveryNotice {
+                    Text(recoveryNotice).font(.callout).foregroundStyle(.secondary)
+                }
                 if job != .info {
                     Text(selectedMediaPresent ? (selectedMediaBlank ? "空白光盘 · 可开始首次刻录" : "已有数据光盘 · 新增文件将使用追加流程") : "放入光盘并合仓，然后刷新设备。")
                         .font(.callout).foregroundStyle(.secondary)
@@ -253,9 +277,13 @@ struct ContentView: View {
         let present: [Bool]
         let blank: [Bool]
     }
-    private func refresh() {
-        guard !isRefreshing, !sessions.blocksDeviceOperations, activeBurn == nil, activeErase == nil else { return }
-        let selectedPath = driveRegistryPaths.indices.contains(selectedDrive) ? driveRegistryPaths[selectedDrive] : nil
+    private func refresh(preferredPath: String? = nil) {
+        guard !deviceTaskActive else { return }
+        let selectedPath = preferredPath ?? (driveRegistryPaths.indices.contains(selectedDrive) ? driveRegistryPaths[selectedDrive] : nil)
+        if sessions.needsDeviceRecovery {
+            sessions.recoverDevice(path: selectedPath) { refreshAfterRecovery(path: $0) }
+            return
+        }
         let selectedBSD = driveBSDNames.indices.contains(selectedDrive) ? driveBSDNames[selectedDrive] : nil
         isRefreshing = true; sessions.reset()
         status = "正在等待系统识别刻录设备…"
@@ -293,6 +321,14 @@ struct ContentView: View {
             status = drives.isEmpty ? "未检测到刻录机。" : "已检测到 \(drives.count) 台刻录机。"
             refreshTask = nil
         }
+    }
+
+    private func refreshAfterRecovery(path: String) {
+        let recoveryMessage = sessions.message
+        refresh(preferredPath: path)
+        // Refresh invalidates UI caches too. Keep the result explicit even when
+        // the data-pane is hidden; recovery never certifies the preceding burn.
+        status = recoveryMessage + " 正在刷新当前设备列表…"
     }
 
     private func updateSelection() {

@@ -14,6 +14,7 @@ xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   "$project_dir/Tests/AppendProofTests.swift" \
   "$project_dir/Sources/OperationEstimate.swift" "$project_dir/Tests/OperationEstimateTests.swift" \
   "$project_dir/Sources/BurnCompletion.swift" "$project_dir/Tests/BurnCompletionTests.swift" \
+  "$project_dir/Sources/DeviceRecovery.swift" "$project_dir/Sources/SessionDeviceCache.swift" "$project_dir/Tests/DeviceRecoveryTests.swift" \
   "$project_dir/Sources/BurnTaskArchive.swift" \
   "$project_dir/Sources/IncrementalISO.swift" "$project_dir/Tests/IncrementalISOTests.swift" \
   "$project_dir/Sources/ISOTrackLayout.swift" \

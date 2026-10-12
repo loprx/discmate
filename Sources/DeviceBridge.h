@@ -10,6 +10,7 @@ int dm_mount_matches(const char *path, const char *bsd);
 int dm_registry_identity(const char *path, uint64_t *identity);
 int dm_registry_has_media(const char *path, int32_t *present);
 int dm_registry_media(const char *path, uint64_t driveID, char *bsd, size_t capacity, DMMedia *result);
+int dm_registry_recovery_state(const char *path, uint64_t *driveID, uint64_t *mediaID, char *bsd, size_t capacity);
 void *dm_authorize_mount(const char *helper, int32_t *status);
 void dm_release_authorization(void *authorization);
 int32_t dm_authorized_mount(void *authorization, const char *helper, const char *bsd, const char *identity, const char *start, char *output, size_t capacity);
