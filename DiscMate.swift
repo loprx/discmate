@@ -127,7 +127,7 @@ struct ContentView: View {
                 if job == .data || job == .audio || job == .image || job == .video {
                     GroupBox(job == .data ? "1 · 添加要刻录的文件" : "选择刻录内容") {
                         VStack(alignment: .leading, spacing: 10) {
-                            if job == .data && !appendMode {
+                            if job == .data && selectedMediaPresent && selectedMediaBlank {
                                 TextField("光盘名称", text: $discName)
                                     .help("首次刻录的光盘名称；追加沿用已有目录结构。")
                                 Toggle("保留后续追加能力", isOn: $keepAppendable)
@@ -168,7 +168,10 @@ struct ContentView: View {
                                     }
                                 }.frame(height: min(170, CGFloat(files.count) * 53))
                             }
-                            if job != .data || !appendMode {
+                            if job == .data && !selectedMediaPresent {
+                                Text("文件已加入，当前未识别到光盘。放入光盘并合仓后刷新设备；已有数据盘会显示追加摘要。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else if job != .data || !appendMode {
                                 Text("开始前显示刻录设置或确认。写入、校验和结束期间保持光驱连接；首次刻录及其他类型仍使用系统刻录面板。")
                                     .font(.caption).foregroundStyle(.secondary)
                             }

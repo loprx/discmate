@@ -14,6 +14,7 @@ The package comes from the project's own [Homebrew tap](https://github.com/loprx
 
 Open the app's Help menu and choose “DiscMate 使用帮助” for the current burn and append workflow.
 Adding files refreshes the current disc state once, so an already inserted data disc shows the append review control without a separate manual refresh.
+The “Keep appendable” setting appears only for an identified blank disc; an existing data disc instead offers append review.
 
 ## Status
 
