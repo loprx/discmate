@@ -1,0 +1,9 @@
+build/
+dist/
+.DS_Store
+*.iso
+*.dmg
+*.zip
+*.app/
+.swiftpm/
+.build/
