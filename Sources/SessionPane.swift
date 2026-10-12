@@ -56,8 +56,28 @@ struct SessionPane: View {
                             Text("可用约 \(OperationEstimate.size(UInt64(writable.freeBlocks) * 2048))")
                         } else { Text("此盘目前不可追加").foregroundStyle(.orange) }
                     }.font(.callout)
-                    Text(snapshot.rootEntries.map(\.name).joined(separator: " · "))
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(snapshot.rootEntries.enumerated()), id: \.offset) { item in
+                                let entry = item.element
+                                HStack(spacing: 10) {
+                                    Image(systemName: entry.directory ? "folder" : "doc")
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 18)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(entry.name).lineLimit(1).help(entry.name)
+                                        Text(recordedMetadata(entry, in: snapshot))
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 4)
+                                }
+                                .padding(.vertical, 7)
+                                Divider()
+                            }
+                        }
+                    }
+                    .frame(height: min(220, max(54, CGFloat(snapshot.rootEntries.count) * 54)))
+                    .accessibilityLabel("盘上已有文件列表")
                 }
 
                 Text(model.message).font(.callout).textSelection(.enabled)
@@ -147,5 +167,12 @@ struct SessionPane: View {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Text(value).font(.headline)
         }
+    }
+
+    private func recordedMetadata(_ entry: ISOEntry, in snapshot: SessionSnapshot) -> String {
+        let kind = entry.directory ? "文件夹" : "文件"
+        let size = OperationEstimate.size(UInt64(entry.bytes))
+        let session = snapshot.tracks.first(where: { $0.contains(entry.lba, bytes: entry.bytes) })?.session
+        return [kind, size, session.map { "第 \($0) 会话" }].compactMap { $0 }.joined(separator: " · ")
     }
 }
