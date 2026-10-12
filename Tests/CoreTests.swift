@@ -7,6 +7,7 @@ struct CoreTests {
     }
     static func main() throws {
         BurnCompletionTests.run()
+        try DeviceRecoveryTests.run()
         OperationEstimateTests.run()
         try AppendProofTests.run()
         try IncrementalISOTests.run(large: CommandLine.arguments.contains("--large-iso"))

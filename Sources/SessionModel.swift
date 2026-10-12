@@ -7,12 +7,23 @@ final class SessionModel: ObservableObject {
     enum Phase: String { case idle, inspecting, preparing, prepared, burning, finishing, recoveryRequired, awaitingReload, authorizing, unmounting, mounting, verifying, ready, failed }
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var message = "添加要刻录的文件，然后点击“查看追加摘要”。只检查旧目录，不完整读取旧文件。"
-    @Published private(set) var snapshot: SessionSnapshot?
-    @Published private(set) var mountedURL: URL?
-    @Published private(set) var verified: [VerifiedFile] = []
-    @Published private(set) var isBusy = false
-    @Published private(set) var needsDeviceRecovery = false
-    var blocksDeviceOperations: Bool { isBusy || needsDeviceRecovery }
+    @Published private var deviceCache = SessionDeviceCache()
+    private(set) var snapshot: SessionSnapshot? {
+        get { deviceCache.snapshot }
+        set { deviceCache.snapshot = newValue }
+    }
+    private(set) var mountedURL: URL? {
+        get { deviceCache.mountedURL }
+        set { deviceCache.mountedURL = newValue }
+    }
+    private(set) var verified: [VerifiedFile] {
+        get { deviceCache.verified }
+        set { deviceCache.verified = newValue }
+    }
+    @Published private var deviceGate = DeviceOperationGate()
+    var isBusy: Bool { deviceGate.isBusy }
+    var needsDeviceRecovery: Bool { deviceGate.needsRecovery }
+    var blocksDeviceOperations: Bool { deviceGate.blocksOperations }
     // Fourth-session readback and the standalone normal eject passed. This
     // remains experimental: native completion passed once; the post-burn DA
     // handoff has not yet been exercised on hardware.
@@ -27,10 +38,71 @@ final class SessionModel: ObservableObject {
     private var task: Task<Void, Never>?
     private var warning: Task<Void, Never>?
     private var monitor: Timer?
-    private var pendingProof: AppendProof?
-    @Published private(set) var proofURL: URL?
-    @Published private(set) var incrementalPlan: PreparedIncrementalISO?
-    private var incrementalSnapshot: SessionSnapshot?
+    private var pendingProof: AppendProof? {
+        get { deviceCache.pendingProof }
+        set { deviceCache.pendingProof = newValue }
+    }
+    private(set) var proofURL: URL? {
+        get { deviceCache.proofURL }
+        set { deviceCache.proofURL = newValue }
+    }
+    private(set) var incrementalPlan: PreparedIncrementalISO? {
+        get { deviceCache.incrementalPlan }
+        set { deviceCache.incrementalPlan = newValue }
+    }
+    private var incrementalSnapshot: SessionSnapshot? {
+        get { deviceCache.incrementalSnapshot }
+        set { deviceCache.incrementalSnapshot = newValue }
+    }
+    @Published private(set) var recoveryTargets: [DeviceRecoveryService.Target] = []
+    @Published var recoveryTargetPath: String?
+    @Published private(set) var recoveryNotice: String?
+
+    /// Unlike a normal task, recovery may enter from a faulted gate, but never
+    /// while a previous operation is still awaited. The source proof survives.
+    func recoverDevice(path: String?, afterRecovery: @escaping @MainActor (String) -> Void) {
+        guard task == nil, deviceGate.beginRecovery() else { return }
+        let targetPath = recoveryTargetPath ?? path
+        invalidateDeviceCache()
+        transition(.recoveryRequired, "正在只读复核光驱状态；不读文件、不写盘、不弹出，通常数秒。请保持盘片和连接稳定。")
+        taskStartedAt = Date()
+        warning = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard !Task.isCancelled, let self, self.isBusy else { return }
+            self.message = "系统状态查询尚未返回；仍保留当前任务，请等待。不会启动第二次检查或刻录。"
+            self.log("Recovery waiting for outstanding status query; device remains reserved")
+        }
+        task = Task {
+            var accepted = false
+            var recoveredPath: String?
+            do {
+                let result = try await Task.detached { try DeviceRecoveryService.check(preferredPath: targetPath) }.value
+                switch result {
+                case .stable(let path, let detail):
+                    self.log("RECOVERY_IDLE_STABLE \(detail); no payload verified; prior source proof retained")
+                    let notice = "光驱已空闲，设备与介质身份复核通过。旧会话和准备镜像已清除，源清单仍保留；尚未读回验证本轮刻录。"
+                    self.recoveryNotice = notice
+                    self.recoveryTargets = []; self.recoveryTargetPath = nil
+                    self.transition(.ready, notice)
+                    accepted = true; recoveredPath = path
+                case .selectionRequired(let targets):
+                    self.recoveryTargets = targets; self.recoveryTargetPath = nil
+                    self.transition(.recoveryRequired, "检测到多个光驱；请在恢复目标中选择要检查的光驱，再点击“重新检查设备”。")
+                }
+            } catch {
+                self.transition(.recoveryRequired, error.localizedDescription)
+            }
+            self.warning?.cancel(); self.warning = nil
+            self.deviceGate.recoveryEnded(accepted: accepted)
+            self.task = nil
+            if let recoveredPath { afterRecovery(recoveredPath) }
+        }
+    }
+
+    private func invalidateDeviceCache() {
+        monitor?.invalidate(); monitor = nil
+        deviceCache.invalidateDevice()
+    }
 
     func invalidatePreparedPlan() {
         guard !isBusy else { return }
@@ -78,9 +150,7 @@ final class SessionModel: ObservableObject {
 
     func reset() {
         guard !blocksDeviceOperations else { return }
-        monitor?.invalidate(); monitor = nil
-        incrementalPlan = nil; incrementalSnapshot = nil
-        snapshot = nil; mountedURL = nil; verified = []; phase = .idle
+        invalidateDeviceCache(); phase = .idle
         message = "添加要刻录的文件，然后点击“查看追加摘要”。只检查旧目录，不完整读取旧文件。"
     }
     func inspect(bsd: String?) {
@@ -309,9 +379,10 @@ final class SessionModel: ObservableObject {
         }
     }
     private func start(_ operation: @escaping @MainActor () async throws -> Void) {
-        guard !blocksDeviceOperations else { return }
+        guard deviceGate.beginOperation() else { return }
+        recoveryNotice = nil
         incrementalPlan = nil; incrementalSnapshot = nil
-        isBusy = true; taskStartedAt = Date(); progressFraction = nil; remainingEstimate = nil
+        taskStartedAt = Date(); progressFraction = nil; remainingEstimate = nil
         logURL = FileManager.default.temporaryDirectory.appendingPathComponent("discmate-\(UUID().uuidString).log")
         log("DiscMate session task; system=\(ProcessInfo.processInfo.operatingSystemVersionString)")
         warning = Task { [weak self] in
@@ -321,16 +392,17 @@ final class SessionModel: ObservableObject {
             self.log("Waiting for outstanding operation; device remains reserved")
         }
         task = Task {
+            var recoveryRequired = false
             do { try await operation() }
             catch let error as BurnRecoveryRequired {
-                self.needsDeviceRecovery = true
-                self.snapshot = nil; self.mountedURL = nil; self.verified = []
+                recoveryRequired = true
+                self.invalidateDeviceCache()
                 self.transition(.recoveryRequired, error.localizedDescription)
             }
             catch { self.transition(.failed, error.localizedDescription) }
             self.warning?.cancel(); self.warning = nil
             self.progressFraction = nil; self.remainingEstimate = nil
-            self.isBusy = false; self.task = nil
+            self.deviceGate.operationEnded(needsRecovery: recoveryRequired); self.task = nil
         }
     }
     private func transition(_ next: Phase, _ text: String) {
