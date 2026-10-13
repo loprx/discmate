@@ -15,7 +15,7 @@ struct SessionPane: View {
     private var locked: Bool { model.blocksDeviceOperations || otherTaskBusy }
 
     var body: some View {
-        GroupBox(offersAppend ? "2 · 查看摘要并追加" : "光盘内容与操作") {
+        DiscMateSection(offersAppend ? "2 · 查看摘要并追加" : "光盘内容与操作") {
             VStack(alignment: .leading, spacing: 12) {
                 if offersAppend {
                     Text("标准追加只检查旧目录与区段，不重新读取旧文件正文；写入后由系统校验本次镜像。")
@@ -107,7 +107,7 @@ struct SessionPane: View {
                 Text("macOS 默认可能显示较早内容。使用“在访达打开最新内容”只读打开最新会话；会自动检查目录，不完整读取文件正文。")
                     .font(.caption).foregroundStyle(.secondary)
 
-                DisclosureGroup("可选：读回校验", isExpanded: $showVerification) {
+                ExpandableSection("可选：读回校验", isExpanded: $showVerification) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("日常追加无需完整读取旧内容。独立读回需先合仓并刷新设备；校验期间保持光驱连接。")
                             .font(.caption).foregroundStyle(.secondary)
@@ -139,7 +139,7 @@ struct SessionPane: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }.padding(.top, 8)
                 }
-                DisclosureGroup("更多工具与诊断", isExpanded: $showDiagnostics) {
+                ExpandableSection("更多工具与诊断", isExpanded: $showDiagnostics) {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Button("重新识别目录") { model.inspect(bsd: bsd) }

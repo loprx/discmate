@@ -149,7 +149,7 @@ struct ContentView: View {
                 }
 
                 if job == .data || job == .audio || job == .image || job == .video {
-                    GroupBox(job == .data ? "1 · 添加要刻录的文件" : "选择刻录内容") {
+                    DiscMateSection(job == .data ? "1 · 添加要刻录的文件" : "选择刻录内容") {
                         VStack(alignment: .leading, spacing: 10) {
                             if job == .data && selectedMediaPresent && selectedMediaBlank {
                                 TextField("光盘名称", text: $discName)
