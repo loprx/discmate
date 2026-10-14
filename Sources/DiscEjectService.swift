@@ -68,7 +68,8 @@ final class DiscEjectService {
         if let dissenter {
             let status = DADissenterGetStatus(dissenter)
             let message = DADissenterGetStatusString(dissenter) as String? ?? "系统拒绝请求"
-            value.continuation.resume(throwing: DiscFailure("正常\(value.action)失败：\(message)（\(status)）；未强制操作或重试。"))
+            value.continuation.resume(throwing: NSError(domain: NSOSStatusErrorDomain, code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "正常\(value.action)失败：\(message)（\(status)）；未强制操作或重试。"]))
         } else { value.continuation.resume() }
     }
 }

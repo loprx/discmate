@@ -29,7 +29,7 @@ struct DeviceOperationGate {
 
 /// Independent registry identity plus the documented DiscRecording status keys.
 /// A new recovery attempt establishes a new baseline, including after reconnect.
-struct DeviceRecoveryState: Equatable {
+struct DeviceRecoveryState: Equatable, Sendable {
     let driveID: UInt64
     let mediaID: UInt64 // Zero means the registry contains no media objects.
     let bsd: String?
@@ -56,6 +56,26 @@ struct DeviceRecoveryState: Equatable {
 }
 
 enum DeviceRecoveryService {
+    /// Legacy DiscRecording panels are not completion evidence. Check the same
+    /// physical drive twice, including its idle and open-tray status.
+    static func checkAfterPanel(path: String, driveID: UInt64, requiresEject: Bool) throws -> DeviceRecoveryState {
+        precondition(!Thread.isMainThread)
+        let devices = (DRDevice.devices() as? [DRDevice]) ?? []
+        guard let device = devices.first(where: { $0.ioRegistryEntryPath() == path }) else {
+            throw BurnRecoveryRequired(detail: "系统进度窗口结束后无法确认原光驱；保留设备恢复锁。")
+        }
+        let first = try observe(device, path: path)
+        Thread.sleep(forTimeInterval: 2)
+        let second = try observe(device, path: path)
+        try DeviceRecoveryState.validateStable(first, second)
+        guard second.driveID == driveID else {
+            throw BurnRecoveryRequired(detail: "系统进度窗口结束后原光驱身份已变化；保留设备恢复锁。")
+        }
+        if requiresEject && (second.mediaPresent != false || second.trayOpen != true) {
+            throw BurnRecoveryRequired(detail: "系统进度窗口结束后仍未确认原光驱空仓并开仓；保留设备恢复锁。")
+        }
+        return second
+    }
     struct Target: Equatable, Sendable {
         let path: String
         let name: String

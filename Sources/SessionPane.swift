@@ -32,6 +32,23 @@ struct SessionPane: View {
                         Text("先在本机准备新增文件，再显示实际占用空间；这一步不写光盘，通常数秒至数分钟，大文件需要更久。")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    Picker("刻录速率", selection: $model.selectedBurnSpeed) {
+                        Text(BurnSpeedSelection.automatic.label()).tag(BurnSpeedSelection.automatic)
+                        ForEach(model.supportedBurnSpeeds, id: \.self) { speed in
+                            Text(BurnSpeedSelection.kilobytesPerSecond(speed).label())
+                                .tag(BurnSpeedSelection.kilobytesPerSecond(speed))
+                        }
+                    }
+                    .frame(maxWidth: 420)
+                    .disabled(locked)
+                    .help("仅列出当前光驱与盘片报告的速率。自动请求系统最高可用速度；实际写入速度会随盘片、设备和写入位置变化。写入前重新核对所选档位。")
+                    if model.supportedBurnSpeeds.isEmpty {
+                        Text("设备尚未提供可选速率；目前可使用自动，空闲时刷新设备可更新列表。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let notice = model.burnSpeedNotice {
+                        Text(notice).font(.caption).foregroundStyle(.secondary)
+                    }
                     HStack {
                         Button(model.incrementalPlan == nil ? "查看追加摘要" : "开始追加…") {
                             if model.incrementalPlan == nil { model.prepareIncremental(sources: sources, bsd: bsd) }
@@ -83,6 +100,9 @@ struct SessionPane: View {
                 Text(model.message).font(.callout).textSelection(.enabled)
                 if model.isBusy {
                     if let fraction = model.progressFraction { ProgressView(value: fraction) }
+                    if model.phase == .burning, let speed = model.actualBurnSpeedKBps {
+                        Text(String(format: "当前写入速率 %.1f MB/s", speed / 1000)).font(.caption).foregroundStyle(.secondary)
+                    }
                     else { ProgressView().controlSize(.small) }
                     HStack {
                         if let start = model.taskStartedAt {
@@ -104,7 +124,7 @@ struct SessionPane: View {
                         .disabled(locked || bsd == nil || drivePath == nil)
                         .help("先正常卸载，再请求推出，并等待约 15 秒确认介质移除。不会刻录或强制卸载；请等托盘实际弹出。")
                 }
-                Text("macOS 默认可能显示较早内容。使用“在访达打开最新内容”只读打开最新会话；会自动检查目录，不完整读取文件正文。")
+                Text("macOS 默认可能显示较早内容。使用“在访达打开最新内容”只读打开最新会话；会自动检查目录，不完整读取文件正文。读回和挂载后不会自动弹盘，取盘请点击“正常推出”。")
                     .font(.caption).foregroundStyle(.secondary)
 
                 ExpandableSection("可选：读回校验", isExpanded: $showVerification) {

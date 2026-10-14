@@ -1,4 +1,5 @@
 import Foundation
+import DiscRecording
 
 /// Pure state model: backend completion and physical completion are independent.
 /// Times are monotonic seconds. A deadline is an observation limit, never a cancel.
@@ -108,6 +109,27 @@ struct BurnProgress: Sendable {
     let state: String
     let fraction: Double?
     let detail: String
+    var errorCode: Int64? = nil
+    var evidence: DiagnosticEvidence? = nil
+    var errorSource: DiagnosticErrorCode.Source = .discRecording
+
+    var diagnosticEventKind: DiagnosticEventKind {
+        switch state {
+        case DRStatusStateTrackWrite: return .writing
+        case DRStatusStateVerifying: return .verifying
+        case DRStatusStateDone: return .backendDone
+        case DRStatusStateFailed: return .backendFailed
+        case "DeviceUnavailable", "DeviceIdentityPending": return .deviceUnavailable
+        case "SameDeviceReturned", "SameDeviceStatusRefreshed": return .deviceAvailable
+        case "BackendReleased": return .backendReleased
+        case "RegistryMedia": return .registryObserved
+        case "DeviceStatus": return .deviceStatusObserved
+        case "SystemEject": return .ejectRequested
+        case "EjectConfirmed": return .ejectCompleted
+        case "PreflightFailed": return .failed
+        default: return kind == .finishing ? .finishing : .waiting
+        }
+    }
 }
 
 struct BurnRecoveryRequired: LocalizedError {

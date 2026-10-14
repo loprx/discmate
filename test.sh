@@ -13,6 +13,11 @@ xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   "$project_dir/Sources/TestAppendService.swift" "$project_dir/Tests/CoreTests.swift" \
   "$project_dir/Tests/AppendProofTests.swift" \
   "$project_dir/Sources/OperationEstimate.swift" "$project_dir/Tests/OperationEstimateTests.swift" \
+  "$project_dir/Sources/SystemTaskProgress.swift" "$project_dir/Tests/SystemTaskProgressTests.swift" \
+  "$project_dir/Sources/BurnSpeed.swift" "$project_dir/Tests/BurnSpeedTests.swift" \
+  "$project_dir/Sources/DeviceChangeObserver.swift" "$project_dir/Tests/DeviceChangeObserverTests.swift" \
+  "$project_dir/Sources/DiagnosticReport.swift" "$project_dir/Tests/DiagnosticReportTests.swift" \
+  "$project_dir/Sources/LegacyMediaPreflight.swift" \
   "$project_dir/Sources/BurnCompletion.swift" "$project_dir/Tests/BurnCompletionTests.swift" \
   "$project_dir/Sources/DeviceRecovery.swift" "$project_dir/Sources/SessionDeviceCache.swift" "$project_dir/Tests/DeviceRecoveryTests.swift" \
   "$project_dir/Sources/BurnTaskArchive.swift" \
@@ -20,3 +25,6 @@ xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   "$project_dir/Sources/ISOTrackLayout.swift" \
   "$test_dir/bridge.o" -framework IOKit -framework DiskArbitration -framework DiscRecording -o "$test_dir/core-tests"
 "$test_dir/core-tests" "$@"
+
+# Real UI owner with an injected backend; never accesses optical hardware.
+zsh "$project_dir/test-native-lifecycle.sh"

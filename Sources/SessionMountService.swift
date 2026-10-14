@@ -85,7 +85,8 @@ final class SessionMountService {
         if let dissenter {
             let status = DADissenterGetStatus(dissenter)
             let text = DADissenterGetStatusString(dissenter) as String? ?? "系统拒绝了挂载操作"
-            box.continuation.resume(throwing: DiscFailure("磁盘管理服务：\(text)（\(status)）。没有强制卸载或重试。"))
+            box.continuation.resume(throwing: NSError(domain: NSOSStatusErrorDomain, code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "磁盘管理服务：\(text)（\(status)）。没有强制卸载或重试。"]))
         } else { box.continuation.resume() }
     }
 }
