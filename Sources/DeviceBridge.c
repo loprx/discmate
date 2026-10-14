@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
+#include <stdbool.h>
 
 // This bridge has no write, erase, eject, or arbitrary ioctl entry point.
 int dm_registry_identity(const char *path, uint64_t *identity) {
@@ -40,6 +42,50 @@ int dm_registry_has_media(const char *path, int32_t *present) {
     int result = IOIteratorIsValid(iterator) ? 0 : EAGAIN;
     IOObjectRelease(iterator);
     return result;
+}
+
+// Passive, bounded registry evidence for a known test drive. No USB/SCSI
+// command is sent. Matching names are used only in memory; callers export
+// counts, never serials, paths or registry IDs. Unknown models remain unknown.
+int dm_registry_optical_probe(DMOpticalRegistryProbe *out) {
+    if (!out) return EINVAL;
+    *out = (DMOpticalRegistryProbe){0, 0, 0};
+    io_iterator_t devices = IO_OBJECT_NULL;
+    kern_return_t status = IOServiceGetMatchingServices(kIOMainPortDefault,
+        IOServiceMatching("IOUSBHostDevice"), &devices);
+    if (status != KERN_SUCCESS) return EIO;
+    int error = 0;
+    io_object_t device;
+    while ((device = IOIteratorNext(devices))) {
+        CFTypeRef vendor = IORegistryEntryCreateCFProperty(device, CFSTR("USB Vendor Name"), kCFAllocatorDefault, 0);
+        CFTypeRef product = IORegistryEntryCreateCFProperty(device, CFSTR("USB Product Name"), kCFAllocatorDefault, 0);
+        bool known = vendor && product && CFGetTypeID(vendor) == CFStringGetTypeID() &&
+            CFGetTypeID(product) == CFStringGetTypeID() && CFEqual(vendor, CFSTR("Lenovo")) &&
+            CFEqual(product, CFSTR("Ultraslim DVD"));
+        if (vendor) CFRelease(vendor);
+        if (product) CFRelease(product);
+        if (known) {
+            if (out->lenovoUSBDevices < UINT32_MAX) ++out->lenovoUSBDevices;
+            io_iterator_t children = IO_OBJECT_NULL;
+            if (IORegistryEntryCreateIterator(device, kIOServicePlane,
+                kIORegistryIterateRecursively, &children) != KERN_SUCCESS) error = EAGAIN;
+            else {
+                io_object_t child;
+                while ((child = IOIteratorNext(children))) {
+                    if (IOObjectConformsTo(child, "IOSCSIPeripheralDeviceType05") &&
+                        out->opticalPeripherals < UINT32_MAX) ++out->opticalPeripherals;
+                    if (IOObjectConformsTo(child, "IODVDMedia") && out->dvdMedia < UINT32_MAX) ++out->dvdMedia;
+                    IOObjectRelease(child);
+                }
+                if (!IOIteratorIsValid(children)) error = EAGAIN;
+                IOObjectRelease(children);
+            }
+        }
+        IOObjectRelease(device);
+    }
+    if (!IOIteratorIsValid(devices)) error = EAGAIN;
+    IOObjectRelease(devices);
+    return error;
 }
 
 int dm_media(const char *bsd, DMMedia *out) {

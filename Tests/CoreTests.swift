@@ -5,7 +5,18 @@ struct CoreTests {
     static func reject(_ name: String, _ body: () throws -> Void) {
         do { try body(); fatalError("Expected rejection: \(name)") } catch { print("PASS reject \(name)") }
     }
-    static func main() throws {
+    static func main() async throws {
+        SystemTaskProgressTests.run()
+        try BurnSpeedTests.run()
+        DeviceChangeObserverTests.run()
+        try await DiagnosticReportTests.run()
+        do {
+            try checkSystem(6, "模拟介质识别")
+            fatalError("expected POSIX failure")
+        } catch {
+            let codes = DiagnosticErrorCode.extract(error: error as NSError, backendError: nil)
+            precondition(codes == [.init(source: .posix, code: 6)])
+        }
         BurnCompletionTests.run()
         try DeviceRecoveryTests.run()
         OperationEstimateTests.run()

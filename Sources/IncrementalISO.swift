@@ -95,7 +95,8 @@ enum IncrementalISO {
         process.waitUntilExit()
         guard process.terminationReason == .exit, process.terminationStatus == 0 else {
             let text = String(decoding: try Data(contentsOf: log).prefix(8192), as: UTF8.self)
-            throw DiscFailure("本地 ISO 创建失败（\(process.terminationStatus)）：\(text)")
+            throw NSError(domain: "DiscMate.Process", code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: "本地 ISO 创建失败（\(process.terminationStatus)）：\(text)"])
         }
     }
 

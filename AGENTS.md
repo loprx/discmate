@@ -1,3 +1,0 @@
-# DiscMate contributor notes
-
-Keep physical drive access serial and off the UI thread. Before writing, revalidate the selected drive, media identity, session, directory, extents, capacity and writable address. Never treat a DiscRecording Done notification as readback or actual eject confirmation. Standard append must not silently read all old file payloads. Keep experimental or unsupported media types clearly labelled. `zsh test.sh` is offline and must not burn a disc; hardware tests require a dedicated test disc and separate evidence. Preserve raw errors without logging file contents or credentials.

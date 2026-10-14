@@ -18,7 +18,10 @@ struct MediaIdentity: Equatable, Sendable {
 }
 
 func checkSystem(_ code: Int32, _ operation: String) throws {
-    guard code == 0 else { throw DiscFailure("\(operation)失败（\(code)）：\(String(cString: strerror(code)))") }
+    guard code == 0 else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(code),
+            userInfo: [NSLocalizedDescriptionKey: "\(operation)失败（\(code)）：\(String(cString: strerror(code)))"])
+    }
 }
 
 struct SessionSnapshot: Sendable {

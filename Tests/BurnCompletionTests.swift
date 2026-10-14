@@ -1,7 +1,14 @@
 import Foundation
+import DiscRecording
 
 enum BurnCompletionTests {
     static func run() {
+        precondition(BurnProgress(kind: .finishing, state: "EjectConfirmed", fraction: nil,
+                                  detail: "").diagnosticEventKind == .ejectCompleted)
+        precondition(BurnProgress(kind: .finishing, state: "SystemEject", fraction: nil,
+                                  detail: "").diagnosticEventKind == .ejectRequested)
+        precondition(BurnProgress(kind: .backend, state: DRStatusStateDone, fraction: nil,
+                                  detail: "").diagnosticEventKind == .backendDone)
         let ejected = BurnCompletion.DeviceState(mediaAbsent: true, trayOpen: true, idle: true)
         // Reproduce P0-001: backend Done, tray closed, no completion evidence.
         var stuck = BurnCompletion()

@@ -8,7 +8,7 @@ struct DiscMateApp: App {
     @NSApplicationDelegateAdaptor(DiscMateApplicationDelegate.self) private var applicationDelegate
 
     var body: some Scene {
-        WindowGroup("DiscMate") {
+        Window("DiscMate", id: "main") {
             ContentView()
                 .frame(minWidth: 700, minHeight: 500)
         }
@@ -42,49 +42,57 @@ private enum Job: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// One refresh result per drive; never combine fields from different indexes.
+private struct DriveInventoryEntry: @unchecked Sendable {
+    let device: DRDevice
+    let description: String
+    let name: String
+    let bsd: String?
+    let path: String?
+    let present: Bool
+    let blank: Bool
+    let media: DiagnosticMediaType
+    let speeds: [Double]
+}
+
 struct ContentView: View {
-    @StateObject private var sessions = SessionModel()
-    @State private var mediaBSD: String?
+    @StateObject private var sessions = SessionModel.shared
+    @StateObject private var nativeTask = SystemDiscTaskModel.shared
+    @StateObject private var deviceChanges = DeviceChangeObserver.shared
+    @StateObject private var coordinator = DeviceTaskCoordinator.shared
+    @State private var showingDiagnostics = false
     @State private var isRefreshing = false
-    @State private var driveDescriptions: [String] = []
-    @State private var driveNames: [String] = []
-    @State private var mediaPresent: [Bool] = []
-    @State private var mediaBlank: [Bool] = []
+    @State private var inventory: [DriveInventoryEntry] = []
+    @State private var firstBurnSpeed: BurnSpeedSelection = .automatic
     @State private var fileSizes: [URL: UInt64] = [:]
-    @State private var driveBSDNames: [String?] = []
-    @State private var driveRegistryPaths: [String?] = []
     @State private var refreshTask: Task<Void, Never>?
     @State private var refreshWarning: Task<Void, Never>?
     @State private var cachedDiscDescription = "连接刻录机后刷新。"
-    @State private var activeErase: DRErase?
-    @State private var erasePanel: DREraseProgressPanel?
     @State private var job: Job = .data
     @State private var filesByJob: [Job: [URL]] = [:]
-    @State private var drives: [DRDevice] = []
     @State private var selectedDrive = 0
     @State private var discName = "DATA"
     @State private var keepAppendable = true
     @State private var status = "连接刻录机后点击“刷新设备”。"
-    @State private var activeBurn: DRBurn?
-    @State private var progressPanel: DRBurnProgressPanel?
 
-    private var drive: DRDevice? {
-        drives.indices.contains(selectedDrive) ? drives[selectedDrive] : nil
+    private var selectedEntry: DriveInventoryEntry? {
+        inventory.indices.contains(selectedDrive) ? inventory[selectedDrive] : nil
     }
+    private var drive: DRDevice? { selectedEntry?.device }
 
     private var files: [URL] { filesByJob[job] ?? [] }
 
     private var locked: Bool {
-        isRefreshing || sessions.blocksDeviceOperations || activeBurn != nil || activeErase != nil
+        isRefreshing || coordinator.isOccupied || sessions.blocksDeviceOperations || nativeTask.isBusy
     }
     private var deviceTaskActive: Bool {
-        isRefreshing || sessions.isBusy || activeBurn != nil || activeErase != nil
+        isRefreshing || coordinator.isOccupied || sessions.isBusy || nativeTask.isBusy
     }
     private var selectedMediaPresent: Bool {
-        mediaPresent.indices.contains(selectedDrive) && mediaPresent[selectedDrive]
+        selectedEntry?.present == true
     }
     private var selectedMediaBlank: Bool {
-        mediaBlank.indices.contains(selectedDrive) && mediaBlank[selectedDrive]
+        selectedEntry?.blank == true
     }
     private var appendMode: Bool { job == .data && selectedMediaPresent && !selectedMediaBlank }
     private var selectedBytes: UInt64 { files.reduce(0) { $0 + (fileSizes[$1] ?? 0) } }
@@ -112,16 +120,16 @@ struct ContentView: View {
 
                 HStack {
                     Picker("刻录机", selection: $selectedDrive) {
-                        if drives.isEmpty { Text("未检测到刻录机").tag(0) }
+                        if inventory.isEmpty { Text("未检测到刻录机").tag(0) }
                         else {
-                            ForEach(drives.indices, id: \.self) { index in
-                                Text(driveNames.indices.contains(index) ? driveNames[index] : "刻录机 \(index + 1)").tag(index)
+                            ForEach(inventory.indices, id: \.self) { index in
+                                Text(inventory[index].name).tag(index)
                             }
                         }
                     }.disabled(locked)
                     Button(isRefreshing ? "正在识别…" : sessions.needsDeviceRecovery ? "重新检查设备" : "刷新设备") { refresh() }
                         .disabled(deviceTaskActive)
-                        .help("换盘、合仓或重连后更新设备状态，通常数秒；不刻录。若系统仍在处理，请等待，不要反复点击。")
+                        .help("设备插拔及盘片变化会自动更新；此按钮可手动重新检查，通常数秒，不刻录。系统忙时请等待。")
                 }.onChange(of: selectedDrive) { _ in updateSelection() }
                 if sessions.needsDeviceRecovery {
                     if !sessions.recoveryTargets.isEmpty {
@@ -134,6 +142,8 @@ struct ContentView: View {
                     }
                     Text(sessions.message + (sessions.isBusy ? "" : " 可点击“重新检查设备”；写入仍暂停。"))
                         .font(.callout).foregroundStyle(.orange)
+                } else if let result = nativeTask.message {
+                    Text(result).font(.caption).foregroundStyle(.secondary)
                 } else if isRefreshing {
                     Text(status).font(.callout).foregroundStyle(.secondary)
                 } else if sessions.isBusy {
@@ -144,7 +154,7 @@ struct ContentView: View {
                     Text(recoveryNotice).font(.callout).foregroundStyle(.secondary)
                 }
                 if job != .info {
-                    Text(selectedMediaPresent ? (selectedMediaBlank ? "空白光盘 · 可开始首次刻录" : "已有数据光盘 · 新增文件将使用追加流程") : "放入光盘并合仓，然后刷新设备。")
+                    Text(sessions.needsDeviceRecovery ? "设备与盘片状态待确认，请重新检查设备。" : selectedMediaPresent ? (selectedMediaBlank ? "空白光盘 · 可开始首次刻录" : "已有数据光盘 · 新增文件将使用追加流程") : "放入光盘并合仓，识别完成后会自动更新。")
                         .font(.callout).foregroundStyle(.secondary)
                 }
 
@@ -156,6 +166,19 @@ struct ContentView: View {
                                     .help("首次刻录的光盘名称；追加沿用已有目录结构。")
                                 Toggle("保留后续追加能力", isOn: $keepAppendable)
                                     .help("首次写入后保留追加能力；介质、文件系统与剩余空间也需要支持追加。关闭后可能无法再加入文件。")
+                                if keepAppendable || diagnosticMedia == .dvdPlusR {
+                                    Picker("刻录速率", selection: $firstBurnSpeed) {
+                                        Text(BurnSpeedSelection.automatic.label()).tag(BurnSpeedSelection.automatic)
+                                        ForEach(selectedBurnSpeeds, id: \.self) { speed in
+                                            Text(BurnSpeedSelection.kilobytesPerSecond(speed).label(oneX: speedOneX))
+                                                .tag(BurnSpeedSelection.kilobytesPerSecond(speed))
+                                        }
+                                    }.help("仅列出当前光驱和盘片报告支持的速率。自动请求系统最高可用速度；实际速度可能随写入阶段变化。")
+                                    if selectedBurnSpeeds.isEmpty {
+                                        Text("系统未提供可选速率，当前可使用自动速度。")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
                             }
                             HStack {
                                 Button(job == .video ? "选择 VIDEO_TS 文件夹…" : appendMode ? "添加文件…" : "添加文件或文件夹…") { chooseFiles() }
@@ -192,11 +215,14 @@ struct ContentView: View {
                                     }
                                 }.frame(height: min(170, CGFloat(files.count) * 53))
                             }
-                            if job == .data && !selectedMediaPresent {
-                                Text("文件已加入，当前未识别到光盘。放入光盘并合仓后刷新设备；已有数据盘会显示追加摘要。")
+                            if sessions.needsDeviceRecovery {
+                                Text("设备状态尚未确认，请先重新检查设备；待刻录文件仍保留。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else if job == .data && !selectedMediaPresent {
+                                Text("文件已加入，当前未识别到光盘。放入光盘并合仓，识别完成后自动显示；已有数据盘会显示追加摘要。")
                                     .font(.caption).foregroundStyle(.secondary)
                             } else if job != .data || !appendMode {
-                                Text("开始前显示刻录设置或确认。写入、校验和结束期间保持光驱连接；首次刻录及其他类型仍使用系统刻录面板。")
+                                Text("开始前显示刻录设置或确认。写入、校验和结束期间保持光驱连接；数据 DVD+R 在本窗口显示刻录与收尾进度。")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }.padding(4).disabled(locked)
@@ -206,9 +232,9 @@ struct ContentView: View {
                 } else { Text(cachedDiscDescription).textSelection(.enabled) }
 
                 if job == .info || appendMode {
-                    SessionPane(model: sessions, bsd: mediaBSD, otherTaskBusy: isRefreshing || activeBurn != nil || activeErase != nil,
+                    SessionPane(model: sessions, bsd: selectedEntry?.bsd, otherTaskBusy: isRefreshing || nativeTask.isBusy,
                                 sources: job == .data ? files : [],
-                                drivePath: driveRegistryPaths.indices.contains(selectedDrive) ? driveRegistryPaths[selectedDrive] : nil,
+                                drivePath: selectedEntry?.path,
                                 offersAppend: appendMode)
                 }
                 if !appendMode {
@@ -217,18 +243,48 @@ struct ContentView: View {
                             .buttonStyle(.borderedProminent)
                             .disabled(locked || (job != .info && job != .erase && files.isEmpty) || drive == nil || (job != .info && !selectedMediaPresent))
                             .help(job == .info ? "重新读取设备信息，不写光盘，通常数秒。" : "进入设置或确认后开始操作。写入及结束期间不要断开光驱、电源或强行退出。")
-                        Text(status).font(.caption).foregroundStyle(.secondary)
+                        Text(nativeTask.message ?? status).font(.caption).foregroundStyle(.secondary)
                     }
                 } else if isRefreshing {
                     Text(status).font(.caption).foregroundStyle(.secondary)
                 }
-                if activeBurn != nil || activeErase != nil {
-                    Text("正在操作光盘。请保持光驱连接与供电，不要强行退出，等待系统进度窗口结束。")
-                        .font(.callout).foregroundStyle(.orange)
+                if let progress = nativeTask.progress {
+                    SystemTaskProgressView(progress: progress, isBusy: nativeTask.isBusy, actualSpeedKBps: nativeTask.actualSpeedKBps)
                 }
+                if let logError = sessions.logError {
+                    Text(logError).font(.caption).foregroundStyle(.orange)
+                }
+                Button("导出脱敏诊断日志…") { showingDiagnostics = true }
+                    .help("选择任务并预览脱敏报告后保存；只读取本机诊断记录，不访问光驱或上传数据。")
             }.frame(maxWidth: .infinity, alignment: .leading).padding(24)
         }
-        .onAppear { refresh() }
+        .onAppear {
+            deviceChanges.setSuspended(true)
+            deviceChanges.start()
+            refresh(source: .startup)
+            deviceChanges.setSuspended(locked)
+        }
+        .onDisappear { deviceChanges.stop() }
+        .onChange(of: locked) { deviceChanges.setSuspended($0) }
+        .onChange(of: deviceChanges.revision) { _ in
+            guard !locked else { return }
+            refresh(preserveNativeResult: true, trigger: deviceChanges.lastDelivery, source: .deviceNotification)
+        }
+        .sheet(isPresented: $showingDiagnostics) { DiagnosticsView() }
+        .onChange(of: sessions.needsDeviceRecovery) { needsRecovery in
+            guard needsRecovery else { return }
+            // A disconnected/replaced drive invalidates the previous inventory,
+            // even while automatic refresh is intentionally held by recovery.
+            inventory = []
+        }
+        .onChange(of: nativeTask.isBusy) { busy in
+            guard !busy else { return }
+            // The completed burn may replace IOMedia without opening the tray.
+            // Discard the pre-burn blank/media/BSD caches before any next action.
+            let completedDrivePath = selectedEntry?.path
+            inventory = []
+            if !sessions.needsDeviceRecovery { refresh(preferredPath: completedDrivePath, preserveNativeResult: true, source: .taskCompleted) }
+        }
         .onChange(of: files) { _ in sessions.invalidatePreparedPlan() }
         .onChange(of: job) { _ in sessions.invalidatePreparedPlan() }
         .task(id: files) {
@@ -269,73 +325,100 @@ struct ContentView: View {
     // wait off the main thread, and retain the task/lock until it really returns.
     // A warning never starts a second enumeration or claims the first was cancelled.
     private struct Inventory: @unchecked Sendable {
-        let devices: [DRDevice]
-        let descriptions: [String]
-        let bsdNames: [String?]
-        let registryPaths: [String?]
-        let names: [String]
-        let present: [Bool]
-        let blank: [Bool]
+        let entries: [DriveInventoryEntry]
+        let registry: DMOpticalRegistryProbe
+        let registryCode: Int32
     }
-    private func refresh(preferredPath: String? = nil) {
-        guard !deviceTaskActive else { return }
-        let selectedPath = preferredPath ?? (driveRegistryPaths.indices.contains(selectedDrive) ? driveRegistryPaths[selectedDrive] : nil)
+    private func refresh(preferredPath: String? = nil, preserveNativeResult: Bool = false,
+                         trigger: DeviceChangeObserver.Delivery? = nil,
+                         source: DiagnosticRefreshSource = .manual) {
+        guard !isRefreshing, !sessions.isBusy, !nativeTask.isBusy else { return }
+        let selectedPath = preferredPath ?? selectedEntry?.path
         if sessions.needsDeviceRecovery {
             sessions.recoverDevice(path: selectedPath) { refreshAfterRecovery(path: $0) }
             return
         }
-        let selectedBSD = driveBSDNames.indices.contains(selectedDrive) ? driveBSDNames[selectedDrive] : nil
+        guard let lease = coordinator.begin() else { return }
+        let selectedBSD = selectedEntry?.bsd
         isRefreshing = true; sessions.reset()
+        if !preserveNativeResult { nativeTask.clearResult() }
+        let diagnosticID = DiagnosticReportStore.shared.startTask(kind: .deviceRefresh, driveModel: diagnosticDriveModel)
+        DiagnosticReportStore.shared.record(taskID: diagnosticID, event: .preparing,
+            evidence: DiagnosticEvidence(refresh: DiagnosticRefreshEvidence(source: source,
+                appeared: trigger?.appeared ?? 0, disappeared: trigger?.disappeared ?? 0,
+                status: trigger?.status ?? 0, duplicate: trigger?.duplicate ?? 0,
+                deferredByTask: trigger?.deferredByTask ?? false,
+                deferredByBusy: trigger?.deferredByBusy ?? false)))
         status = "正在等待系统识别刻录设备…"
         refreshWarning = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 10_000_000_000)
             guard !Task.isCancelled, isRefreshing else { return }
             status = "系统设备服务尚未返回。界面仍可响应；未启动第二次查询或刻录。"
+            DiagnosticReportStore.shared.record(taskID: diagnosticID, event: .waiting)
         }
         refreshTask = Task { @MainActor in
             let result = await Task.detached { () -> Inventory in
                 let devices = (DRDevice.devices() as? [DRDevice]) ?? []
-                let descriptions = devices.map(Self.readDiscDescription)
-                let names = devices.map { device -> String? in
-                    let info = (device.status() as NSDictionary)[DRDeviceMediaInfoKey] as? NSDictionary
-                    return info?[DRDeviceMediaBSDNameKey] as? String
+                let entries = devices.map { device -> DriveInventoryEntry in
+                    let status = device.status() as NSDictionary
+                    let info = status[DRDeviceMediaInfoKey] as? NSDictionary
+                    return DriveInventoryEntry(device: device, description: Self.readDiscDescription(device),
+                        name: device.displayName() ?? "刻录机", bsd: info?[DRDeviceMediaBSDNameKey] as? String,
+                        path: device.ioRegistryEntryPath(), present: device.mediaIsPresent(), blank: device.mediaIsBlank(),
+                        media: Self.mediaKind(device.mediaType()), speeds: BurnSpeedOptions.values(fromStatus: status))
                 }
-                return Inventory(devices: devices, descriptions: descriptions, bsdNames: names,
-                                 registryPaths: devices.map { $0.ioRegistryEntryPath() },
-                                 names: devices.map { $0.displayName() ?? "刻录机" },
-                                 present: devices.map { $0.mediaIsPresent() }, blank: devices.map { $0.mediaIsBlank() })
+                var registry = DMOpticalRegistryProbe()
+                let registryCode = dm_registry_optical_probe(&registry)
+                return Inventory(entries: entries, registry: registry, registryCode: registryCode)
             }.value
-            drives = result.devices; driveDescriptions = result.descriptions; driveBSDNames = result.bsdNames
-            driveRegistryPaths = result.registryPaths
-            driveNames = result.names; mediaPresent = result.present; mediaBlank = result.blank
-            if let selectedPath, let index = result.registryPaths.firstIndex(where: { $0 == selectedPath }) {
+            inventory = result.entries
+            if let selectedPath, let index = result.entries.firstIndex(where: { $0.path == selectedPath }) {
                 selectedDrive = index
-            } else if let selectedBSD, let index = result.bsdNames.firstIndex(where: { $0 == selectedBSD }) {
+            } else if let selectedBSD, let index = result.entries.firstIndex(where: { $0.bsd == selectedBSD }) {
                 selectedDrive = index
             } else {
                 selectedDrive = 0
             }
             isRefreshing = false
             refreshWarning?.cancel(); refreshWarning = nil
+            coordinator.finish(lease)
             updateSelection()
-            status = drives.isEmpty ? "未检测到刻录机。" : "已检测到 \(drives.count) 台刻录机。"
+            if result.registryCode == 0 {
+                DiagnosticReportStore.shared.record(taskID: diagnosticID, event: .registryObserved,
+                    evidence: DiagnosticEvidence(opticalRegistry: DiagnosticOpticalRegistryEvidence(
+                        discRecordingDevices: inventory.count,
+                        lenovoUSBDevices: Int(result.registry.lenovoUSBDevices),
+                        opticalPeripherals: Int(result.registry.opticalPeripherals),
+                        dvdMedia: Int(result.registry.dvdMedia))))
+            } else {
+                DiagnosticReportStore.shared.record(taskID: diagnosticID, event: .registryObserved,
+                    error: NSError(domain: NSPOSIXErrorDomain, code: Int(result.registryCode)))
+            }
+            DiagnosticReportStore.shared.record(taskID: diagnosticID, event: inventory.isEmpty ? .deviceUnavailable : .deviceAvailable,
+                evidence: DiagnosticEvidence(device: DiagnosticDeviceEvidence(mediaAbsent: inventory.isEmpty ? nil : !selectedMediaPresent)))
+            DiagnosticReportStore.shared.record(taskID: diagnosticID, event: .completed)
+            DiagnosticReportStore.shared.finish(taskID: diagnosticID, outcome: .completed)
+            status = inventory.isEmpty ? "未检测到刻录机。" : "已检测到 \(inventory.count) 台刻录机。"
             refreshTask = nil
         }
     }
 
     private func refreshAfterRecovery(path: String) {
         let recoveryMessage = sessions.message
-        refresh(preferredPath: path)
+        refresh(preferredPath: path, source: .recovery)
         // Refresh invalidates UI caches too. Keep the result explicit even when
         // the data-pane is hidden; recovery never certifies the preceding burn.
         status = recoveryMessage + " 正在刷新当前设备列表…"
     }
 
     private func updateSelection() {
-        guard !isRefreshing, !sessions.blocksDeviceOperations, activeBurn == nil, activeErase == nil else { return }
+        guard !isRefreshing, !coordinator.isOccupied, !sessions.blocksDeviceOperations, !nativeTask.isBusy else { return }
         sessions.reset()
-        mediaBSD = driveBSDNames.indices.contains(selectedDrive) ? driveBSDNames[selectedDrive] : nil
-        cachedDiscDescription = driveDescriptions.indices.contains(selectedDrive) ? driveDescriptions[selectedDrive] : "未检测到刻录机。"
+        sessions.diagnosticDriveModel = diagnosticDriveModel
+        sessions.diagnosticMediaType = diagnosticMedia
+        sessions.updateBurnSpeeds(selectedBurnSpeeds)
+        firstBurnSpeed = .automatic
+        cachedDiscDescription = selectedEntry?.description ?? "未检测到刻录机。"
     }
 
     private func chooseFiles() {
@@ -353,12 +436,12 @@ struct ContentView: View {
             }
             // The disc can be inserted while the file chooser is open. Refresh
             // once after selection so the append controls reflect current media.
-            if job == .data { refresh() }
+            if job == .data { refresh(source: .fileSelection) }
         }
     }
 
     private func runJob() {
-        guard !isRefreshing, !sessions.blocksDeviceOperations, activeBurn == nil, activeErase == nil, let drive else { return }
+        guard !isRefreshing, !coordinator.isOccupied, !sessions.blocksDeviceOperations, !nativeTask.isBusy, let drive else { return }
         if job == .info {
             refresh()
             return
@@ -368,14 +451,15 @@ struct ContentView: View {
                 status = "当前盘片不可擦除。"
                 return
             }
+            guard let path = drive.ioRegistryEntryPath() else { status = "无法确认光驱身份。"; return }
+            let preflight: LegacyMediaPreflight
+            do { preflight = try LegacyMediaPreflight.capture(path: path, wasBlank: drive.mediaIsBlank()) }
+            catch { recordPreflightFailure(error, kind: .erase); return }
             guard confirm("擦除光盘", "盘上全部内容将被删除。") else { return }
             guard let erase = DRErase(for: drive) else { return }
-            activeErase = erase
-            let panel = DREraseProgressPanel()
-            erasePanel = panel
-            _ = panel.perform(NSSelectorFromString("beginProgressPanelForErase:"), with: erase)
-            status = "正在擦除。"
-            pollErase()
+            nativeTask.beginErase(erase, model: diagnosticDriveModel, media: diagnosticMedia,
+                                  preflight: preflight,
+                                  requireRecovery: sessions.requireRecovery)
             return
         }
         guard drive.mediaIsPresent() else {
@@ -390,7 +474,29 @@ struct ContentView: View {
             status = "已有数据盘请添加文件后点击“查看追加摘要”。无需完整读取旧内容。"
             return
         }
+        if job == .data && diagnosticMedia == .dvdPlusR {
+            guard let path = drive.ioRegistryEntryPath() else { status = "无法确认光驱身份。"; return }
+            do {
+                let request = try FirstDataBurnRequest.capture(drivePath: path, sources: files,
+                    volumeName: discName.isEmpty ? "DATA" : discName, appendable: keepAppendable, speed: firstBurnSpeed)
+                guard confirm("开始首次刻录", "将写入 \(files.count) 个项目。速率：\(firstBurnSpeed.label(oneX: speedOneX))。\(keepAppendable ? "保留后续追加能力。" : "结束后封盘，无法继续追加。")完成系统校验后自动执行正常推出。") else { return }
+                sessions.reset()
+                nativeTask.beginFirstData(request, model: diagnosticDriveModel, fileCount: files.count,
+                    totalBytes: files.allSatisfy { fileSizes[$0] != nil } ? selectedBytes : nil,
+                    requireRecovery: sessions.requireRecovery)
+            } catch { status = error.localizedDescription }
+            return
+        }
         guard let layout = makeLayout() else { return }
+        guard let path = drive.ioRegistryEntryPath() else { status = "无法确认光驱身份。"; return }
+        let preflight: LegacyMediaPreflight
+        do { preflight = try LegacyMediaPreflight.capture(path: path, wasBlank: drive.mediaIsBlank()) }
+        catch {
+            let kind: DiagnosticTaskKind = job == .audio ? .audioBurn : job == .image ? .imageBurn
+                : job == .video ? .videoBurn : .dataBurn
+            recordPreflightFailure(error, kind: kind)
+            return
+        }
         if job == .data && keepAppendable {
             guard let burn = DRBurn(for: drive) else {
                 status = "无法创建刻录任务。"
@@ -401,12 +507,17 @@ struct ContentView: View {
                 status = "系统未接受保留追加能力的设置，已取消刻录。"
                 return
             }
+            do {
+                burn.setRequestedBurnSpeed(try firstBurnSpeed.requestedSpeed(supported: selectedBurnSpeeds) ?? DRDeviceBurnSpeedMax)
+            } catch { status = error.localizedDescription; return }
             let action = drive.mediaIsBlank() ? "写入第一个区段" : "追加新区段"
-            guard confirm(action, "将写入 \(files.count) 个项目，并保留后续追加能力。此操作会永久占用盘片空间。") else { return }
-            beginBurn(burn, layout: layout, action: action)
+            guard confirm(action, "将写入 \(files.count) 个项目，并保留后续追加能力。速率：\(firstBurnSpeed.label(oneX: speedOneX))。此操作会永久占用盘片空间。") else { return }
+            beginBurn(burn, layout: layout, preflight: preflight, speedSelection: firstBurnSpeed)
             return
         }
-        let setup = DRBurnSetupPanel()
+        guard let setup = DMCreateBurnSetupPanel() else {
+            status = "无法加载刻录设置窗口，未开始写入。"; return
+        }
         setup.setCanSelectAppendableMedia(job == .data)
         guard setup.run() == NSApplication.ModalResponse.OK.rawValue,
               let burn = setup.burnObject() else { return }
@@ -414,49 +525,61 @@ struct ContentView: View {
             status = "系统未启用“Leave disc appendable”，已取消刻录，避免封盘。"
             return
         }
-        beginBurn(burn, layout: layout, action: "刻录")
+        beginBurn(burn, layout: layout, preflight: preflight)
     }
 
-    private func pollErase() {
-        guard let erase = activeErase else { return }
-        let info = erase.status() as NSDictionary
-        let state = info[DRStatusStateKey] as? String ?? "未知状态"
-        if state == DRStatusStateDone || state == DRStatusStateFailed {
-            status = state == DRStatusStateDone ? "擦除完成。" : "擦除失败：\(info[DRErrorStatusKey] ?? "未知错误")"
-            activeErase = nil; erasePanel = nil
-        } else {
-            Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { _ in pollErase() }
+    private var diagnosticDriveModel: DiagnosticDriveModel {
+        .knownModel(selectedEntry?.name)
+    }
+    private func recordPreflightFailure(_ error: Error, kind: DiagnosticTaskKind) {
+        status = error.localizedDescription
+        let reports = DiagnosticReportStore.shared
+        let id = reports.startTask(kind: kind, media: diagnosticMedia, driveModel: diagnosticDriveModel)
+        reports.record(taskID: id, event: .preflightUnavailable, error: error as NSError)
+        reports.finish(taskID: id, outcome: .failed)
+    }
+    private var selectedBurnSpeeds: [Double] {
+        selectedEntry?.speeds ?? []
+    }
+    private var speedOneX: Double {
+        switch diagnosticMedia {
+        case .cdR, .cdRW: return Double(DRDeviceBurnSpeedCD1x)
+        case .bdR, .bdRE: return Double(DRDeviceBurnSpeedBD1x)
+        case .unknown: return 0
+        default: return Double(DRDeviceBurnSpeedDVD1x)
         }
     }
-
-    private func beginBurn(_ burn: DRBurn, layout: Any, action: String) {
-        activeBurn = burn
-        let panel = DRBurnProgressPanel()
-        progressPanel = panel
-        _ = panel.perform(NSSelectorFromString("beginProgressPanelForBurn:layout:"), with: burn, with: layout)
-        status = "正在\(action)…"
-        pollBurn()
+    private var diagnosticMedia: DiagnosticMediaType {
+        selectedEntry?.media ?? .unknown
     }
-
-    private func pollBurn() {
-        guard let burn = activeBurn else { return }
-        let info = burn.status() as NSDictionary
-        let state = info[DRStatusStateKey] as? String ?? "未知状态"
-        if state == DRStatusStateDone {
-            status = "写入完成；尚未验证盘片能否重新挂载和读取。"
-            activeBurn = nil
-            progressPanel = nil
-        } else if state == DRStatusStateFailed {
-            let error = info[DRErrorStatusKey] as? NSDictionary
-            let detail = error?[DRErrorStatusErrorStringKey] as? String ?? "未知错误"
-            status = "刻录失败：\(detail)"
-            activeBurn = nil
-            progressPanel = nil
-        } else {
-            let progress = (info[DRStatusPercentCompleteKey] as? NSNumber)?.doubleValue
-            status = progress.map { "刻录中：\(state) · \(Int($0 * 100))%" } ?? "刻录中：\(state)"
-            Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { _ in pollBurn() }
+    private nonisolated static func mediaKind(_ type: String?) -> DiagnosticMediaType {
+        switch type {
+        case DRDeviceMediaTypeCDR: return .cdR
+        case DRDeviceMediaTypeCDRW: return .cdRW
+        case DRDeviceMediaTypeDVDRAM: return .dvdRAM
+        case DRDeviceMediaTypeDVDR, DRDeviceMediaTypeDVDRDualLayer: return .dvdMinusR
+        case DRDeviceMediaTypeDVDRW, DRDeviceMediaTypeDVDRWDualLayer: return .dvdMinusRW
+        case DRDeviceMediaTypeDVDPlusR, DRDeviceMediaTypeDVDPlusRDoubleLayer: return .dvdPlusR
+        case DRDeviceMediaTypeDVDPlusRW, DRDeviceMediaTypeDVDPlusRWDoubleLayer: return .dvdPlusRW
+        case DRDeviceMediaTypeBDR: return .bdR
+        case DRDeviceMediaTypeBDRE: return .bdRE
+        default: return .unknown
         }
+    }
+    private func beginBurn(_ burn: DRBurn, layout: Any, preflight: LegacyMediaPreflight,
+                           speedSelection: BurnSpeedSelection? = nil) {
+        let kind: DiagnosticTaskKind
+        switch job {
+        case .audio: kind = .audioBurn
+        case .image: kind = .imageBurn
+        case .video: kind = .videoBurn
+        default: kind = .dataBurn
+        }
+        nativeTask.beginBurn(burn, layout: layout, kind: kind, model: diagnosticDriveModel,
+                             media: diagnosticMedia, fileCount: files.count,
+                             totalBytes: files.allSatisfy { fileSizes[$0] != nil } ? selectedBytes : nil,
+                             speedSelection: speedSelection, preflight: preflight,
+                             requireRecovery: sessions.requireRecovery)
     }
 
     private func makeLayout() -> Any? {
