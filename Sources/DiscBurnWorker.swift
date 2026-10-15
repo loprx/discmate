@@ -11,6 +11,7 @@ private struct BurnInput: Sendable {
     let proof: AppendProof
     let source: BurnSource
     let speed: BurnSpeedSelection
+    let verifyAfterWrite: Bool
 }
 private enum BurnJob: Sendable {
     case append(BurnInput)
@@ -159,7 +160,7 @@ private final class DiscBurnWorker: NSObject {
         }
         self.burn = burn; self.track = track
         burn.setAppendable(true)
-        burn.setVerifyDisc(true)
+        burn.setVerifyDisc(prepared.verifyAfterWrite)
         let supportedSpeeds = BurnSpeedOptions.values(fromStatus: status)
         let requestedSpeed = try prepared.speed.requestedSpeed(supported: supportedSpeeds) ?? DRDeviceBurnSpeedMax
         burn.setRequestedBurnSpeed(requestedSpeed)
@@ -167,9 +168,12 @@ private final class DiscBurnWorker: NSObject {
             throw DiscFailure("系统未接受所选刻录速率，未开始刻录。")
         }
         burn.setCompletionAction(DRBurnCompletionActionEject)
-        guard burn.appendable(), burn.verifyDisc(), burn.completionAction() == DRBurnCompletionActionEject else {
+        guard burn.appendable(), burn.verifyDisc() == prepared.verifyAfterWrite,
+              burn.completionAction() == DRBurnCompletionActionEject else {
             throw DiscFailure("系统未接受追加、校验或弹出设置。")
         }
+        emit(.device, state: "PreflightValidated", detail: "追加刻录设置已复核。",
+             evidence: DiagnosticEvidence(verifyAfterWriteAccepted: burn.verifyDisc()))
         try observeAndWrite(burn, device: device, track: track, validate: fresh.identity.validate)
     }
 
@@ -194,14 +198,17 @@ private final class DiscBurnWorker: NSObject {
         try FirstDataBurnRequest.validateCapacity(estimatedBlocks: estimatedBlocks, freeBlocks: free.uint64Value)
         self.burn = burn; self.track = track
         burn.setAppendable(request.appendable)
-        burn.setVerifyDisc(true)
+        burn.setVerifyDisc(request.verifyAfterWrite)
         let speed = try request.speed.requestedSpeed(supported: BurnSpeedOptions.values(fromStatus: status)) ?? DRDeviceBurnSpeedMax
         burn.setRequestedBurnSpeed(speed)
         burn.setCompletionAction(DRBurnCompletionActionEject)
-        guard burn.appendable() == request.appendable, burn.verifyDisc(), burn.requestedBurnSpeed() == speed,
+        guard burn.appendable() == request.appendable, burn.verifyDisc() == request.verifyAfterWrite,
+              burn.requestedBurnSpeed() == speed,
               burn.completionAction() == DRBurnCompletionActionEject else { throw DiscFailure("系统未接受刻录设置，未开始写入。") }
         emit(.device, state: "PreflightValidated", detail: "空白盘身份和刻录设置已复核。",
-             evidence: DiagnosticEvidence(requestedSpeedKBps: Double(speed), requestedSpeedAutomatic: request.speed == .automatic))
+             evidence: DiagnosticEvidence(requestedSpeedKBps: Double(speed),
+                 requestedSpeedAutomatic: request.speed == .automatic,
+                 verifyAfterWriteAccepted: burn.verifyDisc()))
         try observeAndWrite(burn, device: device, track: track, validate: request.validateIdentity)
     }
 
@@ -269,7 +276,7 @@ private final class DiscBurnWorker: NSObject {
         completion.deviceDisconnected()
         queriedRestoredStatus = false
         emit(.warning, state: "DeviceUnavailable", detail: completion.terminal == .done
-             ? "系统写入及校验已完成，设备状态暂不可用；正在等待同一光驱重新确认，不会重复刻录。"
+             ? "系统写入已完成，设备状态暂不可用；正在等待同一光驱重新确认，不会重复刻录。"
              : "收到设备不可用通知，继续等待后端结束；不会自动重试刻录。")
     }
 
@@ -368,8 +375,10 @@ extension TestAppendService {
 enum DiscBurnService {
     @MainActor
     static func burn(snapshot: SessionSnapshot, proof: AppendProof, source: BurnSource,
-                     speed: BurnSpeedSelection = .automatic, progress: (BurnProgress) -> Void) async throws {
-        try await consume(DiscBurnWorker.stream(.append(BurnInput(snapshot: snapshot, proof: proof, source: source, speed: speed))), progress: progress)
+                     speed: BurnSpeedSelection = .automatic, verifyAfterWrite: Bool = false,
+                     progress: (BurnProgress) -> Void) async throws {
+        try await consume(DiscBurnWorker.stream(.append(BurnInput(snapshot: snapshot, proof: proof, source: source,
+            speed: speed, verifyAfterWrite: verifyAfterWrite))), progress: progress)
     }
 
     @MainActor

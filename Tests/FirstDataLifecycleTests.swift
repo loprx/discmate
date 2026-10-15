@@ -23,7 +23,7 @@ struct FirstDataLifecycleTests {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("discmate-native-test-\(UUID())")
         let store = DiagnosticReportStore(directory: directory, appVersion: "test", appBuild: "4")
         let request = FirstDataBurnRequest(drivePath: "offline", driveID: 1, mediaID: 2, bsd: "offline",
-            sources: [], volumeName: "TEST", appendable: true, speed: .automatic)
+            sources: [], volumeName: "TEST", appendable: true, speed: .automatic, verifyAfterWrite: false)
         try request.validateIdentity(driveID: 1, mediaID: 2, bsd: "offline")
         for observed in [(3 as UInt64, 2 as UInt64, "offline"), (1, 4, "offline"), (1, 2, "other")] {
             do { try request.validateIdentity(driveID: observed.0, mediaID: observed.1, bsd: observed.2); preconditionFailure("changed identity accepted") }

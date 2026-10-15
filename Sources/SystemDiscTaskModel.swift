@@ -32,6 +32,7 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
     private var observedDevice: DRDevice?
     private var requestedSpeed: Double?
     private var automaticSpeed: Bool?
+    private var firstDataVerificationObserved = false
     private var lease: UUID?
     private var legacyDrivePath: String?
     private var legacyDriveID: UInt64?
@@ -53,6 +54,9 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
         let id = diagnostics.startTask(kind: .dataBurn, media: .dvdPlusR,
             driveModel: model, fileCount: fileCount, totalBytes: totalBytes)
         taskID = id; isBusy = true; progress = SystemTaskProgress(); actualSpeedKBps = nil
+        firstDataVerificationObserved = false
+        diagnostics.record(taskID: id, event: .preparing,
+            evidence: DiagnosticEvidence(verifyAfterWriteRequested: request.verifyAfterWrite))
         message = "正在检查空白盘、文件与刻录设置…"
         Task { @MainActor in
             var outcome = DiagnosticOutcome.completed
@@ -60,7 +64,9 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
                 try await self.firstDataOperation(request) { update in
                     self.acceptFirstData(update, id: id)
                 }
-                self.message = "写入、系统校验及介质移除检查完成。请确认实际托盘已弹出；重新合仓后可读回核验。"
+                let verification = self.firstDataVerificationObserved ? "系统报告校验阶段" :
+                    (request.verifyAfterWrite ? "已请求系统校验，但未记录到校验阶段" : "未请求系统写后校验")
+                self.message = "写入及介质移除检查完成；\(verification)。请确认实际托盘已弹出；重新合仓后可读回核验。"
             } catch {
                 let needsRecovery = error is BurnRecoveryRequired
                 outcome = needsRecovery ? .needsRecovery : .failed
@@ -80,6 +86,7 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
         guard isBusy, taskID == id else { return }
         var event = DiagnosticEventKind.finishing
         if update.kind == .backend, update.state.hasPrefix("DRStatusState") {
+            if update.state == DRStatusStateVerifying { firstDataVerificationObserved = true }
             progress?.update(state: update.state, fraction: update.fraction)
             actualSpeedKBps = update.evidence?.actualSpeedKBps
             if let progress { event = Self.event(progress.stage) }

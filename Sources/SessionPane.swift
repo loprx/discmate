@@ -18,14 +18,14 @@ struct SessionPane: View {
         DiscMateSection(offersAppend ? "2 · 查看摘要并追加" : "光盘内容与操作") {
             VStack(alignment: .leading, spacing: 12) {
                 if offersAppend {
-                    Text("标准追加只检查旧目录与区段，不重新读取旧文件正文；写入后由系统校验本次镜像。")
+                    Text("标准追加只检查旧目录与区段，不重新读取旧文件正文。")
                         .font(.callout)
                     if let plan = model.incrementalPlan {
                         HStack(alignment: .top, spacing: 24) {
                             summary("保留旧内容", "\(model.snapshot?.rootEntries.count ?? 0) 个文件 · \(OperationEstimate.size(plan.referencedBytes))")
                             summary("本次写入", OperationEstimate.size(plan.imageBytes))
                         }
-                        Text(OperationEstimate.burn(plan.imageBytes)).font(.caption).foregroundStyle(.secondary)
+                        Text(OperationEstimate.burn(plan.imageBytes, verifyAfterWrite: model.verifyAfterWrite)).font(.caption).foregroundStyle(.secondary)
                         Text("旧内容沿用原区段；此摘要不表示旧文件正文已重新校验。")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
@@ -58,7 +58,7 @@ struct SessionPane: View {
                         .disabled(locked || sources.isEmpty || bsd == nil || (model.incrementalPlan != nil && !model.incrementalWriteEnabled))
                         .help(model.incrementalPlan == nil
                               ? "读取光盘目录并暂存新增文件，生成空间与耗时摘要；不写盘、不完整读取旧内容。"
-                              : "确认后永久占用光盘空间。写入、系统校验和收尾期间请勿断开光驱或强行退出。")
+                              : "确认后永久占用光盘空间。写入、可能的系统校验和收尾期间请勿断开光驱或强行退出。")
                         if model.incrementalPlan != nil { Text("开始前还会确认一次").font(.caption).foregroundStyle(.secondary) }
                     }
                     Text("当前追加范围：DVD+R、ISO/Joliet、根目录普通文件，单文件小于 4 GiB；不支持重名覆盖或文件夹追加。自动收尾稳定性仍在验证。")

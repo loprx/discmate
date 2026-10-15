@@ -14,6 +14,10 @@ enum DiagnosticReportTests {
             NSLocalizedDescriptionKey: secret, NSFilePathErrorKey: secret,
             NSUnderlyingErrorKey: NSError(domain: secret, code: 123, userInfo: [NSLocalizedDescriptionKey: secret])
         ])
+        store.record(taskID: first, event: .preparing,
+                     evidence: DiagnosticEvidence(verifyAfterWriteRequested: false))
+        store.record(taskID: first, event: .deviceStatusObserved,
+                     evidence: DiagnosticEvidence(verifyAfterWriteAccepted: false))
         store.record(taskID: first, event: .writing, progress: 0.5)
         store.record(taskID: first, event: .preparing, evidence: DiagnosticEvidence(refresh:
             DiagnosticRefreshEvidence(source: .deviceNotification, appeared: 1, disappeared: 0, status: 4, duplicate: 3,
@@ -34,6 +38,8 @@ enum DiagnosticReportTests {
         precondition(text.contains("unknown") && text.contains("1.2.3"))
         let decoded = try decode(data)
         precondition(decoded.id == first && decoded.fileCount == 2 && decoded.totalBytes == 4_000_000_000)
+        precondition(decoded.events.contains { $0.evidence?.verifyAfterWriteRequested == false })
+        precondition(decoded.events.contains { $0.evidence?.verifyAfterWriteAccepted == false })
         precondition(decoded.events.last?.errorCodes == [
             DiagnosticErrorCode(source: .other, code: -536870198), DiagnosticErrorCode(source: .discRecording, code: -536870198)
         ])

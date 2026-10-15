@@ -73,6 +73,7 @@ struct ContentView: View {
     @State private var selectedDrive = 0
     @State private var discName = "DATA"
     @State private var keepAppendable = true
+    @State private var showVerifyHelp = false
     @State private var status = "连接刻录机后点击“刷新设备”。"
 
     private var selectedEntry: DriveInventoryEntry? {
@@ -161,6 +162,33 @@ struct ContentView: View {
                 if job == .data || job == .audio || job == .image || job == .video {
                     DiscMateSection(job == .data ? "1 · 添加要刻录的文件" : "选择刻录内容") {
                         VStack(alignment: .leading, spacing: 10) {
+                            if job == .data {
+                                HStack(spacing: 6) {
+                                    Toggle("刻录后由系统校验", isOn: $sessions.verifyAfterWrite)
+                                        .help("默认关闭。勾选后，首次刻录或追加完成后由系统校验本次写入，会增加耗时。")
+                                    Button {
+                                        showVerifyHelp.toggle()
+                                    } label: {
+                                        Image(systemName: "info.circle")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityLabel("刻录后系统校验说明")
+                                    .help("查看系统写后校验的作用与耗时说明")
+                                    .popover(isPresented: $showVerifyHelp, arrowEdge: .trailing) {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            Text("刻录后由系统校验").font(.headline)
+                                            Text("勾选后，光盘写入完成时，DiscRecording 会再读取并校验本次写入的数据，通常会增加刻录后的等待时间。")
+                                            Text("此项默认关闭，可在未插入光盘时提前设置，首次刻录和追加都会采用该选择。它不重新读取旧文件；如需检查盘上文件内容，可在刻录后单独进行读回校验。")
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .font(.callout)
+                                        .padding(14)
+                                        .frame(width: 330, alignment: .leading)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                            }
                             if job == .data && selectedMediaPresent && selectedMediaBlank {
                                 TextField("光盘名称", text: $discName)
                                     .help("首次刻录的光盘名称；追加沿用已有目录结构。")
@@ -478,8 +506,9 @@ struct ContentView: View {
             guard let path = drive.ioRegistryEntryPath() else { status = "无法确认光驱身份。"; return }
             do {
                 let request = try FirstDataBurnRequest.capture(drivePath: path, sources: files,
-                    volumeName: discName.isEmpty ? "DATA" : discName, appendable: keepAppendable, speed: firstBurnSpeed)
-                guard confirm("开始首次刻录", "将写入 \(files.count) 个项目。速率：\(firstBurnSpeed.label(oneX: speedOneX))。\(keepAppendable ? "保留后续追加能力。" : "结束后封盘，无法继续追加。")完成系统校验后自动执行正常推出。") else { return }
+                    volumeName: discName.isEmpty ? "DATA" : discName, appendable: keepAppendable,
+                    speed: firstBurnSpeed, verifyAfterWrite: sessions.verifyAfterWrite)
+                guard confirm("开始首次刻录", "将写入 \(files.count) 个项目。速率：\(firstBurnSpeed.label(oneX: speedOneX))。\(keepAppendable ? "保留后续追加能力。" : "结束后封盘，无法继续追加。")\(sessions.verifyAfterWrite ? "写入后由系统校验。" : "跳过系统写后校验；独立读回需重新合仓后手动执行。")结束后自动执行正常推出。") else { return }
                 sessions.reset()
                 nativeTask.beginFirstData(request, model: diagnosticDriveModel, fileCount: files.count,
                     totalBytes: files.allSatisfy { fileSizes[$0] != nil } ? selectedBytes : nil,

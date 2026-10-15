@@ -168,6 +168,8 @@ struct DiagnosticSense: Codable, Equatable, Sendable {
 struct DiagnosticEvidence: Codable, Equatable, Sendable {
     let backendState: DiagnosticBackendState?
     let requestedSpeedAutomatic: Bool?
+    let verifyAfterWriteRequested: Bool?
+    let verifyAfterWriteAccepted: Bool?
     let requestedSpeedKBps: Double?
     let actualSpeedKBps: Double?
     let sense: DiagnosticSense?
@@ -177,12 +179,16 @@ struct DiagnosticEvidence: Codable, Equatable, Sendable {
     let opticalRegistry: DiagnosticOpticalRegistryEvidence?
 
     init(backendState: DiagnosticBackendState? = nil, requestedSpeedKBps: Double? = nil,
-         actualSpeedKBps: Double? = nil, requestedSpeedAutomatic: Bool? = nil, sense: DiagnosticSense? = nil,
+         actualSpeedKBps: Double? = nil, requestedSpeedAutomatic: Bool? = nil,
+         verifyAfterWriteRequested: Bool? = nil, verifyAfterWriteAccepted: Bool? = nil,
+         sense: DiagnosticSense? = nil,
          device: DiagnosticDeviceEvidence? = nil, disc: DiagnosticDiscEvidence? = nil,
          refresh: DiagnosticRefreshEvidence? = nil,
          opticalRegistry: DiagnosticOpticalRegistryEvidence? = nil) {
         self.backendState = backendState
         self.requestedSpeedAutomatic = requestedSpeedAutomatic
+        self.verifyAfterWriteRequested = verifyAfterWriteRequested
+        self.verifyAfterWriteAccepted = verifyAfterWriteAccepted
         // DiscRecording reports its maximum-speed sentinel as a number even
         // when the user selected automatic. Export the choice, not that token.
         self.requestedSpeedKBps = requestedSpeedAutomatic == true ? nil : Self.validSpeed(requestedSpeedKBps)
@@ -211,6 +217,8 @@ struct DiagnosticEvidence: Codable, Equatable, Sendable {
     fileprivate func includingSense(_ parsed: DiagnosticSense?) -> Self {
         Self(backendState: backendState, requestedSpeedKBps: requestedSpeedKBps,
              actualSpeedKBps: actualSpeedKBps, requestedSpeedAutomatic: requestedSpeedAutomatic,
+             verifyAfterWriteRequested: verifyAfterWriteRequested,
+             verifyAfterWriteAccepted: verifyAfterWriteAccepted,
              sense: sense ?? parsed, device: device, disc: disc, refresh: refresh,
              opticalRegistry: opticalRegistry)
     }

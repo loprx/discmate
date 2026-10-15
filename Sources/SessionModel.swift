@@ -46,6 +46,7 @@ final class SessionModel: ObservableObject {
     var diagnosticDriveModel: DiagnosticDriveModel = .unknown
     var diagnosticMediaType: DiagnosticMediaType = .unknown
     @Published var selectedBurnSpeed: BurnSpeedSelection = .automatic
+    @Published var verifyAfterWrite = false
     @Published private(set) var supportedBurnSpeeds: [Double] = []
     @Published private(set) var burnSpeedNotice: String?
 
@@ -359,9 +360,10 @@ final class SessionModel: ObservableObject {
     func burnIncremental() {
         guard incrementalWriteEnabled, !blocksDeviceOperations, let prepared = incrementalPlan, let snapshot = incrementalSnapshot else { return }
         let selectedSpeed = selectedBurnSpeed
+        let selectedVerification = verifyAfterWrite
         let alert = NSAlert()
         alert.messageText = "开始追加这 \(prepared.proof.files.count) 个文件？"
-        alert.informativeText = "新增镜像 \(OperationEstimate.size(prepared.imageBytes))；保留 \(snapshot.rootEntries.count) 个旧文件的原区段，不重写旧内容。盘片空间会永久占用，并保留后续追加能力。\n刻录速率：\(selectedSpeed.label())；实际速度由设备调整。\n\n\(OperationEstimate.burn(prepared.imageBytes))。包含系统写后校验，完成后自动推出。旧文件正文未在本轮校验。\n\n开始后请勿断开光驱、电源或强行退出；当前追加流程不支持安全中途取消。自动结束稳定性仍在验证。"
+        alert.informativeText = "新增镜像 \(OperationEstimate.size(prepared.imageBytes))；保留 \(snapshot.rootEntries.count) 个旧文件的原区段，不重写旧内容。盘片空间会永久占用，并保留后续追加能力。\n刻录速率：\(selectedSpeed.label())；实际速度由设备调整。\n\n\(OperationEstimate.burn(prepared.imageBytes, verifyAfterWrite: selectedVerification))。\(selectedVerification ? "包含系统写后校验" : "跳过系统写后校验")，完成后自动推出。旧文件正文未在本轮校验；独立读回需重新合仓后手动执行。\n\n开始后请勿断开光驱、电源或强行退出；当前追加流程不支持安全中途取消。自动结束稳定性仍在验证。"
         alert.addButton(withTitle: "开始追加"); alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         start(kind: .append, fileCount: prepared.proof.files.count, totalBytes: prepared.proof.files.reduce(0) { $0 + $1.bytes }, preserving: prepared.image) {
@@ -377,6 +379,7 @@ final class SessionModel: ObservableObject {
             self.proofURL = archive.proofURL
             self.logURL = archive.logURL
             self.log("Incremental ISO: imageBytes=\(prepared.imageBytes) referencedBytes=\(prepared.referencedBytes) start=\(prepared.proof.expectedStart) imageSHA256=\(prepared.imageSHA256); expected=\(self.proofURL!.path)")
+            self.log("systemVerifyRequested=\(selectedVerification)")
             for entry in snapshot.rootEntries { self.log("old_extent name=\(entry.name) lba=\(entry.lba) bytes=\(entry.bytes)") }
             for file in prepared.proof.files { self.log("source name=\(file.path) bytes=\(file.bytes) sha256=\(file.sha256)") }
             self.transition(.burning, "正在追加文件；请勿退出程序或断开光驱。")
@@ -384,13 +387,17 @@ final class SessionModel: ObservableObject {
             let requested: Double?
             if case .kilobytesPerSecond(let value) = selectedSpeed { requested = value } else { requested = nil }
             self.diagnostic(.preparing, evidence: DiagnosticEvidence(requestedSpeedKBps: requested,
-                requestedSpeedAutomatic: selectedSpeed == .automatic))
+                requestedSpeedAutomatic: selectedSpeed == .automatic,
+                verifyAfterWriteRequested: selectedVerification))
             var lastStatus = ""
             var measuredState = ""
             var phaseStarted = Date()
+            var verificationObserved = false
             try await DiscBurnService.burn(snapshot: snapshot, proof: prepared.proof,
-                source: .isoImage(prepared.image, bytes: prepared.imageBytes, sha256: prepared.imageSHA256), speed: selectedSpeed) { update in
+                source: .isoImage(prepared.image, bytes: prepared.imageBytes, sha256: prepared.imageSHA256),
+                speed: selectedSpeed, verifyAfterWrite: selectedVerification) { update in
                 let state = update.state, fraction = update.fraction
+                if state == DRStatusStateVerifying { verificationObserved = true }
                 let event = update.diagnosticEventKind
                 if state == "RegistryMedia" {
                     self.diagnostic(event, error: update.errorCode.map { NSError(domain: NSPOSIXErrorDomain, code: Int($0)) }, evidence: update.evidence)
@@ -426,7 +433,9 @@ final class SessionModel: ObservableObject {
                 if status != lastStatus { self.log("backend=\(state) \(status)"); lastStatus = status }
             }
             self.snapshot = nil; self.mountedURL = nil; self.verified = []
-            self.transition(.awaitingReload, "写入及系统校验结束，系统介质移除检查通过。请确认托盘已弹出；需要独立读回时，合仓后刷新设备，可只校验本次新增文件。尚未完成重新装盘读回。")
+            let verification = verificationObserved ? "系统报告校验阶段" :
+                (selectedVerification ? "已请求系统校验，但未记录到校验阶段" : "未请求系统写后校验")
+            self.transition(.awaitingReload, "写入结束，系统介质移除检查通过；\(verification)。请确认托盘已弹出；需要独立读回时，合仓后刷新设备，可只校验本次新增文件。尚未完成重新装盘读回。")
         }
     }
     func reveal() {
