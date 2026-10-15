@@ -12,15 +12,17 @@ struct FirstDataBurnRequest: Sendable {
     let volumeName: String
     let appendable: Bool
     let speed: BurnSpeedSelection
+    let verifyAfterWrite: Bool
 
     static func capture(drivePath: String, sources: [URL], volumeName: String,
-                        appendable: Bool, speed: BurnSpeedSelection) throws -> Self {
+                        appendable: Bool, speed: BurnSpeedSelection, verifyAfterWrite: Bool = false) throws -> Self {
         var driveID: UInt64 = 0, mediaID: UInt64 = 0
         var bsd = [CChar](repeating: 0, count: 64)
         try checkSystem(dm_registry_recovery_state(drivePath, &driveID, &mediaID, &bsd, bsd.count), "记录首次刻录盘片身份")
         guard driveID != 0, mediaID != 0, !sources.isEmpty else { throw DiscFailure("未识别到待刻录光盘或文件。") }
         return Self(drivePath: drivePath, driveID: driveID, mediaID: mediaID, bsd: String(cString: bsd),
-                    sources: sources, volumeName: volumeName, appendable: appendable, speed: speed)
+                    sources: sources, volumeName: volumeName, appendable: appendable, speed: speed,
+                    verifyAfterWrite: verifyAfterWrite)
     }
     func validateIdentity() throws {
         var currentDrive: UInt64 = 0, currentMedia: UInt64 = 0

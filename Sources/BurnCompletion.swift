@@ -67,7 +67,7 @@ struct BurnCompletion {
             guard time - terminalTime >= completionWait else { return nil }
             let detail: String
             switch terminal {
-            case .done: detail = "系统写入及校验已完成，但光驱身份或结束状态未能重新确认。"
+            case .done: detail = "系统刻录任务已结束，但光驱身份或结束状态未能重新确认。"
             case .failed(let error): detail = "系统刻录失败：\(error)。光驱结束状态也未确认。"
             }
             return .failed(detail + "请使用“重新检查设备”恢复，再只读核验；不要重复刻录。", recoveryRequired: true)
@@ -96,7 +96,7 @@ struct BurnCompletion {
         guard time - terminalTime >= completionWait else { return nil }
         let detail: String
         switch terminal {
-        case .done: detail = "系统写入及校验结束，但未取得持续一致的设备与介质移除证据。"
+        case .done: detail = "系统刻录任务已结束，但未取得持续一致的设备与介质移除证据。"
         case .failed(let error): detail = "系统刻录失败：\(error)。结束动作也未确认。"
         }
         return .failed(detail + "已停止新增设备操作，未重试弹出或刻录。", recoveryRequired: true)
@@ -123,7 +123,7 @@ struct BurnProgress: Sendable {
         case "SameDeviceReturned", "SameDeviceStatusRefreshed": return .deviceAvailable
         case "BackendReleased": return .backendReleased
         case "RegistryMedia": return .registryObserved
-        case "DeviceStatus": return .deviceStatusObserved
+        case "DeviceStatus", "PreflightValidated": return .deviceStatusObserved
         case "SystemEject": return .ejectRequested
         case "EjectConfirmed": return .ejectCompleted
         case "PreflightFailed": return .failed

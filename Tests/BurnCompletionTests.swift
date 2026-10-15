@@ -134,7 +134,7 @@ enum BurnCompletionTests {
         precondition(remainsGone.outcome(at: 14, driveStillRegistered: false, registryMediaAbsent: nil) == nil)
         remainsGone.backendEnded(.done, at: 119)
         guard case .failed(let detail, recoveryRequired: true) = remainsGone.outcome(at: 120, driveStillRegistered: false, registryMediaAbsent: nil),
-              detail.contains("系统写入及校验已完成"), !detail.contains("刻录失败") else { fatalError("completion warning lost successful backend result or extended deadline") }
+              detail.contains("系统刻录任务已结束"), !detail.contains("刻录失败") else { fatalError("completion warning lost successful backend result or extended deadline") }
         var failedGone = BurnCompletion()
         failedGone.backendEnded(.failed("raw error 456"), at: 0); failedGone.deviceDisconnected()
         guard case .failed(let detail, recoveryRequired: true) = failedGone.outcome(at: 120, driveStillRegistered: false, registryMediaAbsent: nil), detail.contains("raw error 456") else { fatalError("lost original backend failure") }
