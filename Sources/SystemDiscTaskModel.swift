@@ -60,13 +60,17 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
         message = "正在检查空白盘、文件与刻录设置…"
         Task { @MainActor in
             var outcome = DiagnosticOutcome.completed
+            var mediaReturnedDuringCompletion = false
             do {
                 try await self.firstDataOperation(request) { update in
+                    if update.state == "MediaReturned" { mediaReturnedDuringCompletion = true }
                     self.acceptFirstData(update, id: id)
                 }
                 let verification = self.firstDataVerificationObserved ? "系统报告校验阶段" :
                     (request.verifyAfterWrite ? "已请求系统校验，但未记录到校验阶段" : "未请求系统写后校验")
-                self.message = "写入及介质移除检查完成；\(verification)。请确认实际托盘已弹出；重新合仓后可读回核验。"
+                self.message = mediaReturnedDuringCompletion
+                    ? "写入结束，但收尾期间介质重新出现；未执行后备推出，也未确认当前盘片。\(verification)。请只读重新识别。"
+                    : "写入及介质移除检查完成；\(verification)。请确认实际托盘已弹出；重新合仓后可读回核验。"
             } catch {
                 let needsRecovery = error is BurnRecoveryRequired
                 outcome = needsRecovery ? .needsRecovery : .failed
@@ -100,6 +104,7 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
             case "DeviceUnavailable", "DeviceIdentityPending": event = .deviceUnavailable
             case "SystemEject": event = .ejectRequested
             case "EjectConfirmed": event = .ejectCompleted
+            case "MediaReturned": event = .mediaReturnedDuringCompletion
             case "PreflightFailed", "EjectFailed": event = .failed
             default: event = update.kind == .warning ? .waiting : .finishing
             }

@@ -99,6 +99,27 @@ enum AppendProofTests {
         let legacy = try JSONDecoder().decode(AppendProof.self, from: Data(legacyJSON.utf8))
         precondition(legacy.preserved == nil)
         try legacy.validate([newActual], session: 5, start: start)
+        let onlyDirectories = AppendProof(previousSession: 4, expectedStart: start, files: [],
+            preserved: [old], directories: ["Empty", "Empty/Nested"])
+        var directorySnapshot = snapshot([entries[0], ISOEntry(name: "Empty", lba: start + 21, bytes: 2048, directory: true)])
+        directorySnapshot.recordedEntries = directorySnapshot.rootEntries + [
+            ISOEntry(name: "Empty/Nested", lba: start + 22, bytes: 2048, directory: true)]
+        try onlyDirectories.validateDirectory(directorySnapshot)
+        try onlyDirectories.validate([], session: 5, start: start, addedOnly: true)
+        CoreTests.reject("directory-only proof does not imply old payload read") {
+            try onlyDirectories.validate([], session: 5, start: start)
+        }
+        CoreTests.reject("directory-only missing empty child") {
+            try onlyDirectories.validateDirectory(snapshot(directorySnapshot.rootEntries))
+        }
+        CoreTests.reject("manifest missing parent directory") {
+            try AppendProof(previousSession: 4, expectedStart: start,
+                files: [FileProof(path: "Missing/new.txt", bytes: 19, sha256: hash)]).validateStructure()
+        }
+        CoreTests.reject("manifest file used as parent directory") {
+            try AppendProof(previousSession: 4, expectedStart: start,
+                files: [added, FileProof(path: "new.txt/child", bytes: 19, sha256: hash)]).validateStructure()
+        }
         print("PASS proof scope: added-only/full, metadata preservation, malformed/foreign directory rejection, legacy and new JSON")
     }
 }

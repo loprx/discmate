@@ -11,49 +11,58 @@ struct FileProof: Codable, Equatable, Sendable {
     /// Bounded-memory hashing/copying of regular local files. Reject mutation
     /// during capture; the burner only receives the captured immutable staging.
     static func capture(_ source: URL, to destination: URL? = nil) throws -> FileProof {
-        let fd = Darwin.open(source.path, O_RDONLY | O_NOFOLLOW)
-        guard fd >= 0 else { throw DiscFailure("无法打开源文件：\(source.lastPathComponent)") }
+        let fd = Darwin.open(source.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard fd >= 0 else { throw ioFailure("无法打开源文件：\(source.lastPathComponent)", code: errno) }
         defer { Darwin.close(fd) }
         var before = stat()
-        guard fstat(fd, &before) == 0, before.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+        guard fstat(fd, &before) == 0 else { throw ioFailure("无法检查源文件。", code: errno) }
+        guard before.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
               before.st_size >= 0, UInt64(before.st_size) < UInt64(UInt32.max) else {
-            throw DiscFailure("当前 ISO 测试仅接受小于 4 GiB 的普通文件。")
+            throw AppendPreflightFailure(.unsupportedSource, "当前 ISO 仅接受小于 4 GiB 的普通文件。")
         }
         let output: Int32
         if let destination {
             output = Darwin.open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
-            guard output >= 0 else { throw DiscFailure("无法创建测试暂存文件。") }
+            guard output >= 0 else { throw ioFailure("无法创建暂存文件，请检查本机空间和目录权限。", code: errno) }
         } else { output = -1 }
         defer { if output >= 0 { Darwin.close(output) } }
         var digest = SHA256(); var count: UInt64 = 0
         var data = Data(count: 1024 * 1024)
         while true {
             let n = data.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress!, $0.count) }
-            guard n >= 0 else { throw DiscFailure("读取源文件失败：\(source.lastPathComponent)，errno=\(errno)") }
+            guard n >= 0 else { throw ioFailure("读取源文件失败：\(source.lastPathComponent)", code: errno) }
             if n == 0 { break }
             let chunk = Data(data.prefix(n))
-            digest.update(data: chunk); count += UInt64(n)
+            count += UInt64(n)
+            guard count <= UInt64(before.st_size) else { throw AppendPreflightFailure(.sourceChanged, "源文件在读取期间增长，请重新准备摘要。") }
+            digest.update(data: chunk)
             if output >= 0 {
                 try chunk.withUnsafeBytes { buffer in
                     var offset = 0
                     while offset < n {
                         let written = Darwin.write(output, buffer.baseAddress!.advanced(by: offset), n - offset)
-                        guard written > 0 else { throw DiscFailure("写入暂存文件失败，errno=\(errno)") }
+                        if written < 0 { throw ioFailure("写入暂存文件失败，请检查本机空间。", code: errno) }
+                        guard written > 0 else { throw AppendPreflightFailure(.unavailable, "暂存文件未能继续写入，请检查本机空间。") }
                         offset += written
                     }
                 }
             }
         }
         var after = stat()
-        guard fstat(fd, &after) == 0, count == UInt64(before.st_size), after.st_size == before.st_size,
+        guard fstat(fd, &after) == 0 else { throw ioFailure("无法复核源文件。", code: errno) }
+        guard count == UInt64(before.st_size), after.st_size == before.st_size,
               after.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec,
               after.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec,
               after.st_ctimespec.tv_sec == before.st_ctimespec.tv_sec,
               after.st_ctimespec.tv_nsec == before.st_ctimespec.tv_nsec else {
-            throw DiscFailure("源文件在准备期间发生变化，未开始刻录。")
+            throw AppendPreflightFailure(.sourceChanged, "源文件在准备期间发生变化，未开始刻录。")
         }
         return FileProof(path: source.lastPathComponent, bytes: count,
                          sha256: digest.finalize().map { String(format: "%02x", $0) }.joined())
+    }
+    private static func ioFailure(_ message: String, code: Int32) -> AppendPreflightFailure {
+        AppendPreflightFailure(.unavailable, message,
+            underlyingError: NSError(domain: NSPOSIXErrorDomain, code: Int(code)))
     }
 }
 
@@ -69,6 +78,7 @@ struct AppendProof: Codable, Sendable {
     let files: [FileProof]
     // Absent in legacy manifests, where every file has a source hash.
     var preserved: [PreservedFile]? = nil
+    var directories: [String]? = nil
     var allPaths: Set<String> { Set(files.map(\.path) + (preserved ?? []).map(\.path)) }
 
     /// Validate even locally-created manifests at their consumption boundary.
@@ -78,32 +88,42 @@ struct AppendProof: Codable, Sendable {
         let old = preserved ?? []
         let names = files.map(\.path) + old.map(\.path)
         guard previousSession > 0, previousSession < UInt32.max, expectedStart > 0,
-              !files.isEmpty, names.count <= 10000,
+              (!files.isEmpty || !(directories ?? []).isEmpty), names.count + (directories ?? []).count <= 10000,
               names.allSatisfy(Self.validPath),
+              (directories ?? []).allSatisfy(Self.validPath),
+              Set((names + (directories ?? [])).map { $0.precomposedStringWithCanonicalMapping.lowercased() }).count == names.count + (directories ?? []).count,
               Set(names.map { $0.precomposedStringWithCanonicalMapping.lowercased() }).count == names.count,
               files.allSatisfy({ $0.bytes < UInt64(UInt32.max) && Self.validHash($0.sha256) }),
               old.allSatisfy({ UInt64($0.lba) + (UInt64($0.bytes) + 2047) / 2048 <= UInt64(expectedStart) }) else {
             throw DiscFailure("校验清单包含无效会话、文件名、重复文件、哈希或旧区段地址。")
+        }
+        let folders = Set(directories ?? [])
+        for path in names + Array(folders) {
+            let parent = path.split(separator: "/").dropLast().joined(separator: "/")
+            guard parent.isEmpty || folders.contains(parent) else {
+                throw DiscFailure("校验清单缺少父目录或将文件当作目录。")
+            }
         }
     }
 
     func validateDirectory(_ snapshot: SessionSnapshot) throws {
         try validateStructure()
         guard snapshot.latest.session == previousSession + 1, snapshot.latest.start == expectedStart,
-              snapshot.rootEntries.count == allPaths.count,
-              Set(snapshot.rootEntries.map(\.name)) == allPaths,
-              snapshot.rootEntries.allSatisfy({ entry in
+              snapshot.fileEntries.count == allPaths.count,
+              Set(snapshot.directoryPaths) == Set(directories ?? []),
+              Set(snapshot.fileEntries.map(\.name)) == allPaths,
+              snapshot.fileEntries.allSatisfy({ entry in
                   !entry.directory && snapshot.tracks.contains(where: { $0.contains(entry.lba, bytes: entry.bytes) })
               }) else {
             throw DiscFailure("光盘会话或目录与本轮清单不同，请确认放入的是本轮光盘。")
         }
         for old in preserved ?? [] {
-            guard snapshot.rootEntries.contains(where: { $0.name == old.path && $0.bytes == old.bytes && $0.lba == old.lba }) else {
+            guard snapshot.fileEntries.contains(where: { $0.name == old.path && $0.bytes == old.bytes && $0.lba == old.lba }) else {
                 throw DiscFailure("旧文件区段发生变化：\(old.path)")
             }
         }
         for file in files {
-            guard let entry = snapshot.rootEntries.first(where: { $0.name == file.path }),
+            guard let entry = snapshot.fileEntries.first(where: { $0.name == file.path }),
                   UInt64(entry.bytes) == file.bytes,
                   preserved == nil || snapshot.latest.contains(entry.lba, bytes: entry.bytes) else {
                 throw DiscFailure("文件目录或新增文件区段不匹配：\(file.path)")
@@ -136,10 +156,7 @@ struct AppendProof: Codable, Sendable {
         }
     }
 
-    private static func validPath(_ name: String) -> Bool {
-        !name.isEmpty && name != "." && name != ".." && name.utf16.count <= 64 &&
-        !name.unicodeScalars.contains(where: { $0.value < 32 || $0.value > 0xffff || "*/\\:;?".unicodeScalars.contains($0) })
-    }
+    private static func validPath(_ name: String) -> Bool { AppendSourceTree.validPath(name) }
     private static func validHash(_ value: String) -> Bool {
         value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
     }

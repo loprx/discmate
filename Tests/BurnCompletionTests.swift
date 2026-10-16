@@ -3,10 +3,16 @@ import DiscRecording
 
 enum BurnCompletionTests {
     static func run() {
+        precondition(BurnProgress(kind: .warning, state: "AppendPreflightFailed", fraction: nil,
+                                  detail: "").diagnosticEventKind == .appendPreflightRejected)
+        precondition(BurnProgress(kind: .device, state: "AppendSourcesRevalidated", fraction: nil,
+                                  detail: "").diagnosticEventKind == .appendSourcesRevalidated)
         precondition(BurnProgress(kind: .finishing, state: "EjectConfirmed", fraction: nil,
                                   detail: "").diagnosticEventKind == .ejectCompleted)
         precondition(BurnProgress(kind: .finishing, state: "SystemEject", fraction: nil,
                                   detail: "").diagnosticEventKind == .ejectRequested)
+        precondition(BurnProgress(kind: .finishing, state: "MediaReturned", fraction: nil,
+                                  detail: "").diagnosticEventKind == .mediaReturnedDuringCompletion)
         precondition(BurnProgress(kind: .backend, state: DRStatusStateDone, fraction: nil,
                                   detail: "").diagnosticEventKind == .backendDone)
         let ejected = BurnCompletion.DeviceState(mediaAbsent: true, trayOpen: true, idle: true)
@@ -25,12 +31,13 @@ enum BurnCompletionTests {
         precondition(earlyEject.outcome(at: 1000, driveStillRegistered: true, registryMediaAbsent: true) == nil)
         earlyEject.backendEnded(.done, at: 1001)
         precondition(earlyEject.outcome(at: 1001, driveStillRegistered: true, registryMediaAbsent: true) == nil)
-        precondition(earlyEject.outcome(at: 1016, driveStillRegistered: true, registryMediaAbsent: true) == .ejected)
+        precondition(earlyEject.outcome(at: 1002.5, driveStillRegistered: true, registryMediaAbsent: true) == nil)
+        precondition(earlyEject.outcome(at: 1003, driveStillRegistered: true, registryMediaAbsent: true) == .ejected)
         var lateEject = BurnCompletion()
         lateEject.backendEnded(.done, at: 0)
         lateEject.deviceChanged(ejected)
         precondition(lateEject.outcome(at: 60, driveStillRegistered: true, registryMediaAbsent: true) == nil)
-        precondition(lateEject.outcome(at: 80, driveStillRegistered: true, registryMediaAbsent: true) == .ejected)
+        precondition(lateEject.outcome(at: 62, driveStillRegistered: true, registryMediaAbsent: true) == .ejected)
         // Partial/unknown statuses must never be treated as successful ejection.
         for status in [
             BurnCompletion.DeviceState(mediaAbsent: true, trayOpen: false, idle: true),
@@ -74,22 +81,31 @@ enum BurnCompletionTests {
         failure.backendEnded(.failed("backend raw error 123"), at: 0)
         failure.deviceChanged(ejected)
         precondition(failure.outcome(at: 1, driveStillRegistered: true, registryMediaAbsent: true) == nil)
-        precondition(failure.outcome(at: 16, driveStillRegistered: true, registryMediaAbsent: true) == .failed("backend raw error 123", recoveryRequired: false))
+        precondition(failure.outcome(at: 3, driveStillRegistered: true, registryMediaAbsent: true) == .failed("backend raw error 123", recoveryRequired: false))
         // Reproduce actual fourth-session contradiction: framework open/empty
         // cannot complete while ANY new media object exists under this drive.
         var falseOpen = BurnCompletion()
         falseOpen.backendEnded(.done, at: 0); falseOpen.deviceChanged(ejected)
         precondition(falseOpen.outcome(at: 0, driveStillRegistered: true, registryMediaAbsent: true) == nil)
-        precondition(falseOpen.outcome(at: 14, driveStillRegistered: true, registryMediaAbsent: true) == nil)
-        precondition(falseOpen.outcome(at: 15, driveStillRegistered: true, registryMediaAbsent: false) == nil)
-        precondition(falseOpen.outcome(at: 30, driveStillRegistered: true, registryMediaAbsent: false) == .normalEjectRequired)
+        precondition(falseOpen.outcome(at: 1, driveStillRegistered: true, registryMediaAbsent: true) == nil)
+        precondition(falseOpen.outcome(at: 1.5, driveStillRegistered: true, registryMediaAbsent: false) == .mediaReturned)
+        precondition(falseOpen.outcome(at: 30, driveStillRegistered: true, registryMediaAbsent: false) == .mediaReturned)
+        // Replay 2026-10-16 14:45:56: the drive was empty after Done, the
+        // user reinserted the disc seven seconds later, and the old worker
+        // incorrectly launched Disk Arbitration eject at +42 seconds.
+        var actualReinsert = BurnCompletion()
+        actualReinsert.backendEnded(.done, at: 0); actualReinsert.deviceChanged(ejected)
+        precondition(actualReinsert.outcome(at: 0, driveStillRegistered: true, registryMediaAbsent: true) == nil)
+        actualReinsert.deviceChanged(.init(mediaAbsent: false, trayOpen: false, idle: true))
+        precondition(actualReinsert.outcome(at: 7, driveStillRegistered: true, registryMediaAbsent: true) == nil)
+        precondition(actualReinsert.outcome(at: 26, driveStillRegistered: true, registryMediaAbsent: false) == .mediaReturned)
+        precondition(actualReinsert.outcome(at: 42, driveStillRegistered: true, registryMediaAbsent: false) != .normalEjectRequired)
         var transient = BurnCompletion()
         transient.backendEnded(.done, at: 0); transient.deviceChanged(ejected)
         precondition(transient.outcome(at: 0, driveStillRegistered: true, registryMediaAbsent: true) == nil)
-        precondition(transient.outcome(at: 10, driveStillRegistered: true, registryMediaAbsent: false) == nil)
+        precondition(transient.outcome(at: 1, driveStillRegistered: true, registryMediaAbsent: false) == .mediaReturned)
         precondition(transient.outcome(at: 20, driveStillRegistered: true, registryMediaAbsent: true) == nil)
-        precondition(transient.outcome(at: 34, driveStillRegistered: true, registryMediaAbsent: true) == nil)
-        precondition(transient.outcome(at: 35, driveStillRegistered: true, registryMediaAbsent: true) == .ejected)
+        precondition(transient.outcome(at: 22, driveStillRegistered: true, registryMediaAbsent: true) == .ejected)
         // Registry errors must not be interpreted as either absence or presence.
         var unknown = BurnCompletion()
         unknown.backendEnded(.done, at: 0); unknown.deviceChanged(ejected)
@@ -116,8 +132,8 @@ enum BurnCompletionTests {
         // A fresh status from the SAME identity starts a new settling window.
         afterDone.deviceChanged(ejected)
         precondition(afterDone.outcome(at: 31, driveStillRegistered: true, registryMediaAbsent: true) == nil)
-        precondition(afterDone.outcome(at: 45, driveStillRegistered: true, registryMediaAbsent: true) == nil)
-        precondition(afterDone.outcome(at: 46, driveStillRegistered: true, registryMediaAbsent: true) == .ejected)
+        precondition(afterDone.outcome(at: 32.5, driveStillRegistered: true, registryMediaAbsent: true) == nil)
+        precondition(afterDone.outcome(at: 33, driveStillRegistered: true, registryMediaAbsent: true) == .ejected)
         // Identity failure while routing a notification must invalidate the
         // previous open/idle state even if the following timer sees the drive.
         var droppedNotification = BurnCompletion()
@@ -127,8 +143,8 @@ enum BurnCompletionTests {
         precondition(droppedNotification.outcome(at: 15, driveStillRegistered: true, registryMediaAbsent: true) == nil)
         droppedNotification.deviceChanged(ejected)
         precondition(droppedNotification.outcome(at: 16, driveStillRegistered: true, registryMediaAbsent: true) == nil)
-        precondition(droppedNotification.outcome(at: 30, driveStillRegistered: true, registryMediaAbsent: true) == nil)
-        precondition(droppedNotification.outcome(at: 31, driveStillRegistered: true, registryMediaAbsent: true) == .ejected)
+        precondition(droppedNotification.outcome(at: 17.5, driveStillRegistered: true, registryMediaAbsent: true) == nil)
+        precondition(droppedNotification.outcome(at: 18, driveStillRegistered: true, registryMediaAbsent: true) == .ejected)
         var remainsGone = BurnCompletion()
         remainsGone.backendEnded(.done, at: 0); remainsGone.deviceDisconnected()
         precondition(remainsGone.outcome(at: 14, driveStillRegistered: false, registryMediaAbsent: nil) == nil)
@@ -154,7 +170,7 @@ enum BurnCompletionTests {
         precondition(busyPresent.outcome(at: 21, driveStillRegistered: true, registryMediaAbsent: false) == nil)
         precondition(busyPresent.outcome(at: 36, driveStillRegistered: true, registryMediaAbsent: false) == .normalEjectRequired)
         print("PASS post-Done loss: bounded observation, fresh same-drive status, no stale success, no busy eject, original write result retained")
-        print("PASS completion registry contradiction, normal-eject handoff, unknown registry, failed burn, transient media")
+        print("PASS fast removal confirmation, no second eject after media return, normal-eject handoff, unknown registry, failed burn")
         print("PASS completion: Done-without-eject, reordered events, partial states, disconnect, duplicate, backend failure")
     }
 }

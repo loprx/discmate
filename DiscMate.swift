@@ -65,6 +65,9 @@ struct ContentView: View {
     @State private var inventory: [DriveInventoryEntry] = []
     @State private var firstBurnSpeed: BurnSpeedSelection = .automatic
     @State private var fileSizes: [URL: UInt64] = [:]
+    @State private var directoryURLs: Set<URL> = []
+    @State private var selectionRevision = UUID()
+    private struct SelectionKey: Equatable { let files: [URL]; let revision: UUID }
     @State private var refreshTask: Task<Void, Never>?
     @State private var refreshWarning: Task<Void, Never>?
     @State private var cachedDiscDescription = "连接刻录机后刷新。"
@@ -117,7 +120,7 @@ struct ContentView: View {
                 Picker("任务", selection: $job) {
                     ForEach(Job.allCases) { task in Text(task.rawValue).tag(task) }
                 }.pickerStyle(.segmented).disabled(locked)
-                    .help("选择操作类型。数据追加仅开放已验证的 DVD+R ISO/Joliet 根目录文件流程。")
+                    .help("选择操作类型。数据追加当前仅支持已实盘验证的 DVD+R ISO/Joliet 文件和文件夹流程。")
 
                 HStack {
                     Picker("刻录机", selection: $selectedDrive) {
@@ -209,29 +212,29 @@ struct ContentView: View {
                                 }
                             }
                             HStack {
-                                Button(job == .video ? "选择 VIDEO_TS 文件夹…" : appendMode ? "添加文件…" : "添加文件或文件夹…") { chooseFiles() }
+                                Button(job == .video ? "选择 VIDEO_TS 文件夹…" : "添加文件或文件夹…") { chooseFiles() }
                                     .help("选择本机文件加入待刻录列表；不会写入光盘。开始前会检查容量和文件是否可读。")
                                 Button("清空列表") { filesByJob[job] = [] }.disabled(files.isEmpty)
                                     .help("仅移除列表中的待刻录项目，不删除源文件或盘上内容。")
                                 Spacer()
-                                Text("\(files.count) 个项目 · \(selectedSizeText)")
+                                Text("已选 \(files.count) 个顶层项目 · \(selectedSizeText)")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             if files.isEmpty {
-                                Text(appendMode ? "选择要新增的普通文件。盘上的旧文件会保留，不需重新添加。" : "添加内容后，查看设置并开始刻录。")
+                                Text(appendMode ? "选择或拖入新增文件、文件夹。盘上旧内容会保留，不需重新添加。" : "添加内容后，查看设置并开始刻录。")
                                     .foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 70, alignment: .center)
                             } else {
                                 ScrollView {
                                     VStack(spacing: 0) {
                                         ForEach(files, id: \.self) { file in
                                             HStack {
-                                                Image(systemName: "doc").foregroundStyle(.secondary)
+                                                Image(systemName: directoryURLs.contains(file) ? "folder" : "doc").foregroundStyle(.secondary)
                                                 VStack(alignment: .leading, spacing: 2) {
                                                     Text(file.lastPathComponent).lineLimit(1)
                                                     Text(file.deletingLastPathComponent().path).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                                                 }
                                                 Spacer()
-                                                Text(fileSizes[file].map(OperationEstimate.size) ?? "大小待检查")
+                                                Text(directoryURLs.contains(file) ? "目录内大小待检查" : (fileSizes[file].map(OperationEstimate.size) ?? "大小待检查"))
                                                     .font(.caption).foregroundStyle(.secondary)
                                                 Button { filesByJob[job]?.removeAll { $0 == file } } label: {
                                                     Image(systemName: "xmark.circle.fill")
@@ -254,6 +257,11 @@ struct ContentView: View {
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }.padding(4).disabled(locked)
+                        .dropDestination(for: URL.self) { urls, _ in
+                            guard job == .data, !locked, !urls.isEmpty, urls.allSatisfy(\.isFileURL) else { return false }
+                            addSelectedURLs(urls)
+                            return true
+                        }
                     }
                 } else if job == .erase {
                     Text("仅适用于可擦写光盘。擦除会删除盘上全部内容；开始前需确认，耗时取决于盘型和擦除方式，可能数分钟或更久。")
@@ -315,20 +323,24 @@ struct ContentView: View {
         }
         .onChange(of: files) { _ in sessions.invalidatePreparedPlan() }
         .onChange(of: job) { _ in sessions.invalidatePreparedPlan() }
-        .task(id: files) {
+        .task(id: SelectionKey(files: files, revision: selectionRevision)) {
             let selected = files
-            let sizes = await Task.detached { () -> [URL: UInt64] in
+            let metadata = await Task.detached { () -> ([URL: UInt64], Set<URL>) in
                 var result: [URL: UInt64] = [:]
+                var directories: Set<URL> = []
                 for url in selected {
-                    if let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                       values.isRegularFile == true, let bytes = values.fileSize {
-                        result[url] = UInt64(max(0, bytes))
+                    if let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .fileSizeKey]) {
+                        if values.isDirectory == true { directories.insert(url) }
+                        if values.isRegularFile == true, let bytes = values.fileSize {
+                            result[url] = UInt64(max(0, bytes))
+                        }
                     }
                 }
-                return result
+                return (result, directories)
             }.value
-            guard !Task.isCancelled else { return }
-            fileSizes = sizes
+            guard !Task.isCancelled, selected == files else { return }
+            fileSizes = metadata.0
+            directoryURLs = metadata.1
         }
     }
 
@@ -452,20 +464,27 @@ struct ContentView: View {
     private func chooseFiles() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = job != .image && job != .video
-        panel.canChooseDirectories = (job == .data && !appendMode) || job == .video
+        panel.canChooseDirectories = job == .data || job == .video
         panel.canChooseFiles = job != .video
         if panel.runModal() == .OK {
-            if job == .image || job == .video {
-                filesByJob[job] = panel.urls
-            } else {
-                for url in panel.urls where !files.contains(url) {
-                    filesByJob[job, default: []].append(url)
-                }
-            }
-            // The disc can be inserted while the file chooser is open. Refresh
-            // once after selection so the append controls reflect current media.
-            if job == .data { refresh(source: .fileSelection) }
+            addSelectedURLs(panel.urls)
         }
+    }
+
+    private func addSelectedURLs(_ urls: [URL]) {
+        guard !locked else { return }
+        selectionRevision = UUID()
+        if job == .image || job == .video {
+            filesByJob[job] = urls
+        } else {
+            for url in urls where !filesByJob[job, default: []].contains(url) {
+                filesByJob[job, default: []].append(url)
+            }
+        }
+        sessions.invalidatePreparedPlan()
+        // A disc may change while the chooser is open; drop follows the same
+        // invalidation and refresh path, without inspecting the source tree here.
+        if job == .data { refresh(source: .fileSelection) }
     }
 
     private func runJob() {
