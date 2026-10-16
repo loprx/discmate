@@ -10,18 +10,26 @@ CLANG_MODULE_CACHE_PATH=/tmp/discmate-clang-cache SDKROOT="$sdk_path" \
 xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   -import-objc-header "$project_dir/Sources/DeviceBridge.h" \
   "$project_dir/Sources/ISO9660.swift" "$project_dir/Sources/DVDSessionReader.swift" \
+  "$project_dir/Sources/RecordedDirectoryTree.swift" "$project_dir/Tests/RecordedDirectoryTreeTests.swift" \
+  "$project_dir/Sources/MountedSessionDirectory.swift" "$project_dir/Tests/MountedSessionDirectoryTests.swift" \
   "$project_dir/Sources/TestAppendService.swift" "$project_dir/Tests/CoreTests.swift" \
+  "$project_dir/Sources/AppendSourceTree.swift" \
+  "$project_dir/Tests/AppendSourceTreeTests.swift" \
+  "$project_dir/Sources/AppendDiagnostics.swift" "$project_dir/Tests/AppendDiagnosticsTests.swift" \
   "$project_dir/Tests/AppendProofTests.swift" \
   "$project_dir/Sources/OperationEstimate.swift" "$project_dir/Tests/OperationEstimateTests.swift" \
   "$project_dir/Sources/SystemTaskProgress.swift" "$project_dir/Tests/SystemTaskProgressTests.swift" \
   "$project_dir/Sources/BurnSpeed.swift" "$project_dir/Tests/BurnSpeedTests.swift" \
   "$project_dir/Sources/DeviceChangeObserver.swift" "$project_dir/Tests/DeviceChangeObserverTests.swift" \
   "$project_dir/Sources/DiagnosticReport.swift" "$project_dir/Tests/DiagnosticReportTests.swift" \
+  "$project_dir/Sources/DiagnosticPreview.swift" "$project_dir/Tests/DiagnosticPreviewTests.swift" \
+  "$project_dir/Tests/DiagnosticPreviewFixture.swift" \
   "$project_dir/Sources/LegacyMediaPreflight.swift" \
   "$project_dir/Sources/BurnCompletion.swift" "$project_dir/Tests/BurnCompletionTests.swift" \
   "$project_dir/Sources/DeviceRecovery.swift" "$project_dir/Sources/SessionDeviceCache.swift" "$project_dir/Tests/DeviceRecoveryTests.swift" \
   "$project_dir/Sources/BurnTaskArchive.swift" \
   "$project_dir/Sources/IncrementalISO.swift" "$project_dir/Tests/IncrementalISOTests.swift" \
+  "$project_dir/Tests/FolderIntegrationTests.swift" \
   "$project_dir/Sources/ISOTrackLayout.swift" \
   "$test_dir/bridge.o" -framework IOKit -framework DiskArbitration -framework DiscRecording -o "$test_dir/core-tests"
 "$test_dir/core-tests" "$@"

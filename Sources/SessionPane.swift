@@ -22,14 +22,26 @@ struct SessionPane: View {
                         .font(.callout)
                     if let plan = model.incrementalPlan {
                         HStack(alignment: .top, spacing: 24) {
-                            summary("保留旧内容", "\(model.snapshot?.rootEntries.count ?? 0) 个文件 · \(OperationEstimate.size(plan.referencedBytes))")
-                            summary("本次写入", OperationEstimate.size(plan.imageBytes))
+                            summary("本次新增", "\(plan.addedFileCount) 个文件 · \(plan.addedDirectoryCount) 个目录")
+                            summary("保留旧内容", "\(plan.preservedFileCount) 个文件 · \(plan.preservedDirectoryCount) 个目录")
+                        }
+                        Text("新增数据 \(OperationEstimate.size(plan.addedBytes))；旧正文 \(OperationEstimate.size(plan.referencedBytes)) 沿用原区段。")
+                            .font(.caption).foregroundStyle(.secondary)
+                        HStack(alignment: .top, spacing: 24) {
+                            summary("新增镜像", OperationEstimate.size(plan.imageBytes))
+                            summary("会话收尾预留", OperationEstimate.size(plan.capacityMarginBytes))
+                        }
+                        if let writable = model.snapshot?.writable {
+                            let available = UInt64(writable.freeBlocks) * 2048
+                            let required = plan.imageBytes + plan.capacityMarginBytes
+                            Text("盘片可用约 \(OperationEstimate.size(available))；扣除镜像和预留后约 \(OperationEstimate.size(available > required ? available - required : 0))。预留是保守估算，实际占用以写后识别为准。")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                         Text(OperationEstimate.burn(plan.imageBytes, verifyAfterWrite: model.verifyAfterWrite)).font(.caption).foregroundStyle(.secondary)
                         Text("旧内容沿用原区段；此摘要不表示旧文件正文已重新校验。")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
-                        Text("先在本机准备新增文件，再显示实际占用空间；这一步不写光盘，通常数秒至数分钟，大文件需要更久。")
+                        Text("先检查来源和旧目录，再在本机准备新增文件与目录；这一步不写光盘，通常数秒至数分钟，大文件需要更久。")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Picker("刻录速率", selection: $model.selectedBurnSpeed) {
@@ -61,13 +73,13 @@ struct SessionPane: View {
                               : "确认后永久占用光盘空间。写入、可能的系统校验和收尾期间请勿断开光驱或强行退出。")
                         if model.incrementalPlan != nil { Text("开始前还会确认一次").font(.caption).foregroundStyle(.secondary) }
                     }
-                    Text("当前追加范围：DVD+R、ISO/Joliet、根目录普通文件，单文件小于 4 GiB；不支持重名覆盖或文件夹追加。自动收尾稳定性仍在验证。")
+                    Text("当前支持：DVD+R、ISO/Joliet 文件与文件夹；支持中文、多层和空目录，同路径目录合并，不覆盖文件。不支持符号链接，新增文件和镜像均须小于 4 GiB。文件夹已有一次本机实盘读回；自动收尾稳定性仍待持续验证。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
                 if let snapshot = model.snapshot {
                     HStack {
-                        Text("盘上已有 \(snapshot.rootEntries.count) 个项目")
+                        Text("盘上根目录 \(snapshot.rootEntries.count) 项 · 共 \(snapshot.fileEntries.count) 个文件、\(snapshot.directoryPaths.count) 个目录")
                         Spacer()
                         if let writable = snapshot.writable, snapshot.appendable {
                             Text("可用约 \(OperationEstimate.size(UInt64(writable.freeBlocks) * 2048))")
@@ -134,7 +146,7 @@ struct SessionPane: View {
                         HStack {
                             Button("只校验本次新增文件") { model.verifyRecorded(addedOnly: true, bsd: bsd) }
                                 .disabled(locked || (model.snapshot == nil && bsd == nil) || !model.canVerifyAdded)
-                                .help("按本次源清单计算新增文件 SHA-256，并检查旧文件目录和区段；不读取旧正文。")
+                                .help("按本次源清单计算新增文件 SHA-256，并检查目录和旧区段；不读取旧正文。若仅追加空目录，只检查目录，不执行文件哈希。")
                             if model.canVerifyAdded {
                                 Text("\(OperationEstimate.size(model.addedVerificationBytes)) · \(OperationEstimate.read(model.addedVerificationBytes))")
                                     .font(.caption).foregroundStyle(.secondary)

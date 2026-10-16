@@ -25,9 +25,11 @@ enum DiagnosticEventKind: String, Codable {
     case started, preparing, waiting, writing, verifying, finishing
     case backendDone, backendFailed, backendCancelled
     case deviceUnavailable, deviceAvailable, recoveryRequired
-    case ejectRequested, ejectCompleted, mountRequested, mountCompleted
+    case ejectRequested, ejectCompleted, mediaReturnedDuringCompletion, mountRequested, mountCompleted
     case panelFinished, panelCreationFailed, backendObservationUnavailable, backendReleased, registryObserved, deviceStatusObserved
     case preflightIdentityRejected, preflightCapabilityRejected, preflightUnavailable
+    case appendSourcesChecked, appendSourcesRevalidated, appendPreflightRejected
+    case readbackDirectoryMatched
     case readbackStarted, readbackAddedStarted, readbackFullStarted, readbackAddedSourcesMatched, readbackAllReadableKnownSourcesMatched, readbackAllReadable, readbackFailed, failed, completed, cancelled
 }
 
@@ -86,6 +88,27 @@ struct DiagnosticDiscEvidence: Codable, Equatable, Sendable {
         self.latestSession = latestSession; self.latestStartLBA = latestStartLBA
         self.nextWritableLBA = nextWritableLBA; self.freeBlocks = freeBlocks
         self.rootEntryCount = rootEntryCount; self.appendable = appendable; self.imageBytes = imageBytes
+    }
+}
+
+/// Classification and counts only; source names and directory paths stay local.
+enum DiagnosticAppendFailure: String, Codable, Sendable {
+    case conflict, unsupportedSource, invalidName, sourceChanged, mediaChanged, capacity, invalidTree, unavailable, other
+}
+
+struct DiagnosticAppendEvidence: Codable, Equatable, Sendable {
+    let failure: DiagnosticAppendFailure?
+    let addedFiles: Int?
+    let addedDirectories: Int?
+    let preservedFiles: Int?
+    let preservedDirectories: Int?
+    let addedBytes: UInt64?
+    let sessionAllowanceBytes: UInt64?
+    var isValid: Bool {
+        [addedFiles, addedDirectories, preservedFiles, preservedDirectories].allSatisfy {
+            $0 == nil || (0...10000).contains($0!)
+        } && (addedBytes == nil || addedBytes! < UInt64(UInt32.max)) &&
+        (sessionAllowanceBytes == nil || sessionAllowanceBytes! <= 1024 * 1024 * 1024)
     }
 }
 
@@ -177,6 +200,7 @@ struct DiagnosticEvidence: Codable, Equatable, Sendable {
     let disc: DiagnosticDiscEvidence?
     let refresh: DiagnosticRefreshEvidence?
     let opticalRegistry: DiagnosticOpticalRegistryEvidence?
+    let append: DiagnosticAppendEvidence?
 
     init(backendState: DiagnosticBackendState? = nil, requestedSpeedKBps: Double? = nil,
          actualSpeedKBps: Double? = nil, requestedSpeedAutomatic: Bool? = nil,
@@ -184,7 +208,8 @@ struct DiagnosticEvidence: Codable, Equatable, Sendable {
          sense: DiagnosticSense? = nil,
          device: DiagnosticDeviceEvidence? = nil, disc: DiagnosticDiscEvidence? = nil,
          refresh: DiagnosticRefreshEvidence? = nil,
-         opticalRegistry: DiagnosticOpticalRegistryEvidence? = nil) {
+         opticalRegistry: DiagnosticOpticalRegistryEvidence? = nil,
+         append: DiagnosticAppendEvidence? = nil) {
         self.backendState = backendState
         self.requestedSpeedAutomatic = requestedSpeedAutomatic
         self.verifyAfterWriteRequested = verifyAfterWriteRequested
@@ -198,6 +223,7 @@ struct DiagnosticEvidence: Codable, Equatable, Sendable {
         self.disc = disc
         self.refresh = refresh?.isValid == true ? refresh : nil
         self.opticalRegistry = opticalRegistry?.isValid == true ? opticalRegistry : nil
+        self.append = append?.isValid == true ? append : nil
     }
 
     private static func validSpeed(_ value: Double?) -> Double? {
@@ -211,7 +237,7 @@ struct DiagnosticEvidence: Codable, Equatable, Sendable {
         (requestedSpeedKBps == nil || Self.validSpeed(requestedSpeedKBps) != nil) &&
         (actualSpeedKBps == nil || Self.validSpeed(actualSpeedKBps) != nil) &&
         (sense == nil || sense!.isValid) && (refresh == nil || refresh!.isValid) &&
-        (opticalRegistry == nil || opticalRegistry!.isValid)
+        (opticalRegistry == nil || opticalRegistry!.isValid) && (append == nil || append!.isValid)
     }
 
     fileprivate func includingSense(_ parsed: DiagnosticSense?) -> Self {
@@ -220,7 +246,7 @@ struct DiagnosticEvidence: Codable, Equatable, Sendable {
              verifyAfterWriteRequested: verifyAfterWriteRequested,
              verifyAfterWriteAccepted: verifyAfterWriteAccepted,
              sense: sense ?? parsed, device: device, disc: disc, refresh: refresh,
-             opticalRegistry: opticalRegistry)
+             opticalRegistry: opticalRegistry, append: append)
     }
 }
 

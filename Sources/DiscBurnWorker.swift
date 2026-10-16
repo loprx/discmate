@@ -12,6 +12,7 @@ private struct BurnInput: Sendable {
     let source: BurnSource
     let speed: BurnSpeedSelection
     let verifyAfterWrite: Bool
+    let sourceValidation: PreparedIncrementalISO?
 }
 private enum BurnJob: Sendable {
     case append(BurnInput)
@@ -23,6 +24,7 @@ private enum BurnJob: Sendable {
 private struct BurnDrive: Sendable {
     let path: String
     let registryID: UInt64
+    let originalMediaID: UInt64
 }
 
 /// Owns all burn objects on one dedicated thread with a serviced run loop.
@@ -39,6 +41,7 @@ private final class DiscBurnWorker: NSObject {
     private var center: DRNotificationCenter?
     private var devicePath = ""
     private var deviceRegistryID: UInt64 = 0
+    private var originalMediaID: UInt64 = 0
     private var started = false
     private var result: BurnCompletion.Outcome?
     private var lastBackend = ""
@@ -90,9 +93,12 @@ private final class DiscBurnWorker: NSObject {
         // we're waiting for device release/ejection later.
         do { try autoreleasepool { try begin() } }
         catch {
-            let diagnostic = DiagnosticErrorCode.extract(error: error as NSError, backendError: nil).first
-            emit(.warning, state: "PreflightFailed", detail: error.localizedDescription,
-                 errorCode: diagnostic?.code, errorSource: diagnostic?.source ?? .other)
+            let appendRejection: (error: NSError, evidence: DiagnosticEvidence)?
+            if case .append = job, !started { appendRejection = AppendDiagnostics.rejection(error) }
+            else { appendRejection = nil }
+            let diagnostic = DiagnosticErrorCode.extract(error: appendRejection?.error ?? (error as NSError), backendError: nil).first
+            emit(.warning, state: appendRejection == nil ? "PreflightFailed" : "AppendPreflightFailed", detail: error.localizedDescription,
+                 errorCode: diagnostic?.code, evidence: appendRejection?.evidence, errorSource: diagnostic?.source ?? .other)
             return .finished(.failed(error.localizedDescription, recoveryRequired: started), nil)
         }
         // Keep a run-loop source even when DiscRecording isn't delivering events.
@@ -103,7 +109,8 @@ private final class DiscBurnWorker: NSObject {
         while result == nil {
             autoreleasepool { _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 1)) }
         }
-        return .finished(result!, BurnDrive(path: devicePath, registryID: deviceRegistryID))
+        return .finished(result!, BurnDrive(path: devicePath, registryID: deviceRegistryID,
+                                             originalMediaID: originalMediaID))
     }
 
     private func begin() throws {
@@ -125,10 +132,11 @@ private final class DiscBurnWorker: NSObject {
             fresh = try reader.scan()
         }
         guard fresh.latest == prepared.snapshot.latest, fresh.descriptorHash == prepared.snapshot.descriptorHash,
-              fresh.rootEntries == prepared.snapshot.rootEntries,
+              fresh.treeEntries == prepared.snapshot.treeEntries,
               fresh.appendable, fresh.writable?.nextWritable == prepared.proof.expectedStart else {
-            throw DiscFailure("准备后盘片状态变化，未开始刻录。")
+            throw LegacyPreflightFailure.changedMedium
         }
+        originalMediaID = fresh.identity.registryID
         guard let device = DRDevice(forBSDName: fresh.identity.bsd) else {
             throw DiscFailure("目标刻录设备已不可用。")
         }
@@ -156,7 +164,8 @@ private final class DiscBurnWorker: NSObject {
             track = generated
         case .isoImage(let url, let bytes, _):
             track = try ISOTrackLayout.load(url, bytes: bytes)
-            guard bytes / 2048 <= UInt64(fresh.writable?.freeBlocks ?? 0) else { throw DiscFailure("镜像超出当前剩余空间。") }
+            try IncrementalISO.validateCapacity(imageBytes: bytes,
+                freeBlocks: fresh.writable?.freeBlocks ?? 0, start: prepared.proof.expectedStart)
         }
         self.burn = burn; self.track = track
         burn.setAppendable(true)
@@ -174,7 +183,16 @@ private final class DiscBurnWorker: NSObject {
         }
         emit(.device, state: "PreflightValidated", detail: "追加刻录设置已复核。",
              evidence: DiagnosticEvidence(verifyAfterWriteAccepted: burn.verifyDisc()))
-        try observeAndWrite(burn, device: device, track: track, validate: fresh.identity.validate)
+        try observeAndWrite(burn, device: device, track: track) {
+            if let plan = prepared.sourceValidation {
+                // Recheck original sources after image verification and device
+                // setup, immediately before handing the immutable image to DR.
+                try plan.validateSourcesUnchanged()
+                emit(.device, state: "AppendSourcesRevalidated", detail: "写入前源文件和目录复核通过。",
+                     evidence: AppendDiagnostics.summary(plan))
+            }
+            try fresh.identity.validate()
+        }
     }
 
     private func beginFirstData(_ request: FirstDataBurnRequest) throws {
@@ -182,6 +200,7 @@ private final class DiscBurnWorker: NSObject {
         guard let device = DRDevice(forBSDName: request.bsd), device.isValid(),
               device.ioRegistryEntryPath() == request.drivePath else { throw DiscFailure("目标刻录机不可用。") }
         self.device = device; devicePath = request.drivePath; deviceRegistryID = request.driveID
+        originalMediaID = request.mediaID
         let status = device.status() as NSDictionary
         let media = status[DRDeviceMediaInfoKey] as? NSDictionary
         guard (status[DRDeviceIsBusyKey] as? NSNumber)?.boolValue == false,
@@ -242,7 +261,7 @@ private final class DiscBurnWorker: NSObject {
             completion.backendEnded(state == DRStatusStateDone ? .done : .failed(error), at: lastActivity)
             if first {
                 emit(.finishing, state: state,
-                     detail: "系统刻录任务结束，正在交叉核对介质状态并完成正常推出；尚未完成读回验证。")
+                     detail: "系统刻录任务结束，正在确认介质移除；检测到空仓后约 2 秒完成确认。请等任务解锁后再合仓；尚未读回。")
             }
         }
     }
@@ -376,9 +395,10 @@ enum DiscBurnService {
     @MainActor
     static func burn(snapshot: SessionSnapshot, proof: AppendProof, source: BurnSource,
                      speed: BurnSpeedSelection = .automatic, verifyAfterWrite: Bool = false,
+                     sourceValidation: PreparedIncrementalISO? = nil,
                      progress: (BurnProgress) -> Void) async throws {
         try await consume(DiscBurnWorker.stream(.append(BurnInput(snapshot: snapshot, proof: proof, source: source,
-            speed: speed, verifyAfterWrite: verifyAfterWrite))), progress: progress)
+            speed: speed, verifyAfterWrite: verifyAfterWrite, sourceValidation: sourceValidation))), progress: progress)
     }
 
     @MainActor
@@ -394,6 +414,10 @@ enum DiscBurnService {
             case .finished(.ejected, _):
                 progress(BurnProgress(kind: .finishing, state: "EjectConfirmed", fraction: nil, detail: "持续介质移除检查通过；请确认实际托盘。"))
                 return
+            case .finished(.mediaReturned, _):
+                progress(BurnProgress(kind: .finishing, state: "MediaReturned", fraction: nil,
+                    detail: "收尾期间介质重新出现；已停止后备推出，未确认当前盘片身份。请只读重新识别。"))
+                return
             case .finished(.normalEjectRequired, let drive):
                 // The worker's autorelease pool and registrations are gone. The
                 // enclosing SessionModel still owns the one device task. Resolve
@@ -402,6 +426,11 @@ enum DiscBurnService {
                     guard let drive else { throw DiscFailure("缺少刻录设备身份，未执行额外推出。") }
                     var bsd = [CChar](repeating: 0, count: 64); var media = DMMedia()
                     try checkSystem(dm_registry_media(drive.path, drive.registryID, &bsd, bsd.count, &media), "结束后重新识别介质")
+                    guard media.registryID == drive.originalMediaID else {
+                        progress(BurnProgress(kind: .finishing, state: "MediaReturned", fraction: nil,
+                            detail: "收尾时盘片身份已变化；已停止后备推出。请只读重新识别。"))
+                        return
+                    }
                     let identity = MediaIdentity(bsd: String(cString: bsd), registryID: media.registryID, bytes: media.bytes)
                     progress(BurnProgress(kind: .finishing, state: "SystemEject", fraction: nil,
                         detail: "后端已释放，系统仍识别到介质（\(identity.bsd)，\(identity.registryID)）；开始一次正常卸载和推出。"))

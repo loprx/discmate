@@ -118,7 +118,68 @@ enum DiagnosticReportTests {
         precondition(unavailableIssue)
         try await evidenceTests(root: root, secret: secret)
         try await retentionTests(root: root)
+        try await appendPreflightTests(root: root, secret: secret)
+        try await mediaReturnReportTests(root: root, secret: secret)
         print("PASS diagnostics: privacy whitelist, numeric errors, preview export selection, persistence, bounded history/progress and storage failure")
+    }
+
+    private static func mediaReturnReportTests(root: URL, secret: String) async throws {
+        let store = DiagnosticReportStore(directory: root.appendingPathComponent("media-return"),
+                                          appVersion: "0.3.8", appBuild: "2026101603")
+        let id = store.startTask(kind: .append, media: .dvdPlusR)
+        store.record(taskID: id, event: .backendDone)
+        store.record(taskID: id, event: .backendReleased)
+        store.record(taskID: id, event: .registryObserved,
+                     evidence: DiagnosticEvidence(device: DiagnosticDeviceEvidence(registryMediaPresent: false)))
+        store.record(taskID: id, event: .mediaReturnedDuringCompletion,
+                     evidence: DiagnosticEvidence(device: DiagnosticDeviceEvidence(registryMediaPresent: true)))
+        store.finish(taskID: id, outcome: .completed)
+        let data = try await store.exportData(taskID: id)
+        let report = try decode(data)
+        precondition(report.id == id && report.outcome == .completed)
+        precondition(report.events.map(\.kind).suffix(4) ==
+                     [.backendDone, .backendReleased, .registryObserved, .mediaReturnedDuringCompletion])
+        precondition(!report.events.contains { $0.kind == .ejectRequested || $0.kind == .ejectCompleted })
+        precondition(!String(decoding: data, as: UTF8.self).contains(secret))
+        let restored = DiagnosticReportStore(directory: root.appendingPathComponent("media-return"))
+        let replay = try await decode(restored.exportData(taskID: id))
+        precondition(replay.events.last?.kind == .mediaReturnedDuringCompletion)
+    }
+
+    private static func appendPreflightTests(root: URL, secret: String) async throws {
+        let store = DiagnosticReportStore(directory: root.appendingPathComponent("append-preflight"), appVersion: "0.3.8", appBuild: "1")
+        let success = store.startTask(kind: .appendPreparation)
+        let counts = DiagnosticAppendEvidence(failure: nil, addedFiles: 3, addedDirectories: 2,
+            preservedFiles: 4, preservedDirectories: 1, addedBytes: 123, sessionAllowanceBytes: 32 * 1024 * 1024)
+        store.record(taskID: success, event: .appendSourcesChecked, evidence: DiagnosticEvidence(append: counts))
+        store.record(taskID: success, event: .appendSourcesRevalidated, evidence: DiagnosticEvidence(append: counts))
+        store.finish(taskID: success, outcome: .completed)
+        let report = try await decode(store.exportData(taskID: success))
+        precondition(report.appVersion == "0.3.8" && report.outcome == .completed)
+        precondition(report.events.last?.evidence?.append == counts)
+        for reason: DiagnosticAppendFailure in [.conflict, .unsupportedSource, .invalidName, .sourceChanged, .capacity, .invalidTree, .unavailable, .other] {
+            let id = store.startTask(kind: .appendPreparation)
+            let evidence = DiagnosticAppendEvidence(failure: reason, addedFiles: nil, addedDirectories: nil,
+                preservedFiles: nil, preservedDirectories: nil, addedBytes: nil, sessionAllowanceBytes: nil)
+            store.record(taskID: id, event: .appendPreflightRejected,
+                error: NSError(domain: NSPOSIXErrorDomain, code: 13, userInfo: [NSLocalizedDescriptionKey: secret]),
+                evidence: DiagnosticEvidence(append: evidence))
+            store.finish(taskID: id, outcome: .failed)
+            let data = try await store.exportData(taskID: id)
+            let failed = try decode(data)
+            precondition(failed.id == id && failed.outcome == .failed)
+            precondition(failed.events.last?.kind == .appendPreflightRejected)
+            precondition(failed.events.last?.evidence?.append?.failure == reason)
+            precondition(failed.events.last?.errorCodes == [.init(source: .posix, code: 13)])
+            precondition(!String(decoding: data, as: UTF8.self).contains(secret))
+        }
+        let invalid = DiagnosticAppendEvidence(failure: nil, addedFiles: -1, addedDirectories: nil,
+            preservedFiles: nil, preservedDirectories: nil, addedBytes: nil, sessionAllowanceBytes: nil)
+        precondition(DiagnosticEvidence(append: invalid).append == nil)
+        let reopened = DiagnosticReportStore(directory: root.appendingPathComponent("append-preflight"))
+        let restored = try await decode(reopened.exportData(taskID: success))
+        precondition(restored.events.last?.evidence?.append == counts)
+        print("PASS append diagnostics: success/failure classification, counts, numeric errors, redaction and restart")
     }
 
     private static func retentionTests(root: URL) async throws {

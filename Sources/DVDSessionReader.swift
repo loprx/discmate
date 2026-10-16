@@ -32,6 +32,10 @@ struct SessionSnapshot: Sendable {
     let rootEntries: [ISOEntry]
     let descriptorHash: String
     let appendable: Bool
+    var recordedEntries: [ISOEntry]? = nil
+    var treeEntries: [ISOEntry] { (recordedEntries ?? rootEntries).sorted { $0.name < $1.name } }
+    var fileEntries: [ISOEntry] { treeEntries.filter { !$0.directory } }
+    var directoryPaths: [String] { treeEntries.filter(\.directory).map(\.name) }
     var writable: RecordedTrack? { tracks.last(where: { $0.blank && $0.nextWritable != nil && !$0.damaged }) }
 }
 
@@ -52,7 +56,7 @@ final class DVDSessionReader {
         try identity.validate()
         self.identity = identity
         fd = Darwin.open("/dev/r\(identity.bsd)", O_RDONLY | O_NONBLOCK)
-        if fd < 0 { throw DiscFailure("只读打开光盘失败：\(String(cString: strerror(errno)))") }
+        if fd < 0 { try checkSystem(errno, "只读打开光盘") }
     }
     deinit { close() }
     /// Close before transferring the drive to the burn engine. Don't depend on
@@ -96,10 +100,13 @@ final class DVDSessionReader {
             if data[0] == 255 { terminated = true; break }
         }
         guard terminated, primary != nil, let volume = joliet ?? primary else { throw DiscFailure("ISO 卷描述符不完整。") }
-        let entries = try directory(volume.root, volume: volume, tracks: tracks)
+        let tree = try RecordedDirectoryTree.scan(root: volume.root, tracks: tracks, capacityBytes: identity.bytes) {
+            try self.directory($0, volume: volume, tracks: tracks)
+        }
+        let entries = tree.filter { !$0.name.contains("/") }
         try preflight()
         return SessionSnapshot(identity: identity, tracks: tracks, latest: latest, volume: volume, rootEntries: entries,
-                               descriptorHash: hash(descriptors), appendable: disc.status == 1)
+                               descriptorHash: hash(descriptors), appendable: disc.status == 1, recordedEntries: tree)
     }
     private func read(lba: UInt32, bytes: UInt32, tracks: [RecordedTrack]) throws -> Data {
         guard bytes <= 1024 * 1024, tracks.contains(where: { $0.contains(lba, bytes: bytes) }) else {
@@ -112,7 +119,8 @@ final class DVDSessionReader {
         let count = result.withUnsafeMutableBytes { buffer in
             pread(fd, buffer.baseAddress!, rounded, off_t(lba) * 2048)
         }
-        guard count == rounded else { throw DiscFailure("光盘读回不足：预期 \(rounded) 字节，实际 \(count)；errno=\(errno)。") }
+        if count < 0 { try checkSystem(errno, "光盘只读读取") }
+        guard count == rounded else { throw DiscFailure("光盘读回不足：预期 \(rounded) 字节，实际 \(count)。") }
         return Data(result.prefix(Int(bytes)))
     }
     private func directory(_ entry: ISOEntry, volume: ISOVolume, tracks: [RecordedTrack]) throws -> [ISOEntry] {
@@ -124,7 +132,7 @@ final class DVDSessionReader {
     /// This prototype caps capture at 64 MiB; it does not re-burn captured bytes.
     func captureRecorded(_ expected: SessionSnapshot, to url: URL) throws {
         let fresh = try scan()
-        guard fresh.latest == expected.latest, fresh.descriptorHash == expected.descriptorHash else {
+        guard fresh.latest == expected.latest, fresh.descriptorHash == expected.descriptorHash, fresh.treeEntries == expected.treeEntries else {
             throw DiscFailure("创建镜像前会话信息变化，请重新识别。")
         }
         let tracks = fresh.tracks.filter { !$0.blank && $0.session <= fresh.latest.session }
@@ -160,69 +168,49 @@ final class DVDSessionReader {
         let fresh = try scan()
         guard fresh.identity == snapshot.identity, fresh.latest == snapshot.latest,
               fresh.descriptorHash == snapshot.descriptorHash,
-              fresh.rootEntries == snapshot.rootEntries else { throw DiscFailure("校验前介质、会话或目录发生变化。") }
+              fresh.treeEntries == snapshot.treeEntries else { throw DiscFailure("校验前介质、会话或目录发生变化。") }
         if let paths {
-            guard !paths.isEmpty, paths.count <= 10000,
-                  paths.allSatisfy({ !$0.isEmpty && !$0.hasPrefix("/") && !$0.contains("\0") &&
-                      $0.split(separator: "/", omittingEmptySubsequences: false).allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) }) else {
+            // Empty means a directory-only append: validate metadata without
+            // claiming hashes or reading any old payload.
+            guard paths.count <= 10000, paths.isSubset(of: Set(fresh.fileEntries.map(\.name))) else {
                 throw DiscFailure("请选择当前会话中有效的文件进行校验。")
             }
         }
-        if let mount { try checkSystem(dm_mount_matches(mount.path, identity.bsd), "检查只读挂载来源") }
-        var result: [VerifiedFile] = []; var visited = Set<UInt32>(); var total: UInt64 = 0; var entriesCount = 0; var processed: UInt64 = 0
-        func visit(_ entry: ISOEntry, path: String, depth: Int) throws {
-            guard depth <= 32, visited.insert(entry.lba).inserted else { throw DiscFailure("目录过深或含循环引用，已停止校验。") }
-            let children = try directory(entry, volume: fresh.volume, tracks: fresh.tracks)
-            if let mount {
-                let directoryURL = path.isEmpty ? mount : mount.appendingPathComponent(path)
-                let actualNames = try FileManager.default.contentsOfDirectory(atPath: directoryURL.path)
-                guard Set(actualNames) == Set(children.map(\.name)) else { throw DiscFailure("挂载目录与最新会话不一致：\(path.isEmpty ? "根目录" : path)") }
-            }
-            for child in children {
-                entriesCount += 1
-                guard entriesCount <= 10000 else { throw DiscFailure("目录项超过 10000，停止本次完整校验。") }
-                let relative = path.isEmpty ? child.name : path + "/" + child.name
-                let url = mount?.appendingPathComponent(relative)
-                var info = stat()
-                if let url {
-                    guard lstat(url.path, &info) == 0 else { throw DiscFailure("无法检查挂载文件：\(relative)") }
-                }
-                let kind = info.st_mode & mode_t(S_IFMT)
-                if child.directory {
-                    guard mount == nil || kind == mode_t(S_IFDIR) else { throw DiscFailure("挂载目录类型不匹配。") }
-                    try visit(child, path: relative, depth: depth + 1)
-                } else {
-                    guard mount == nil || (kind == mode_t(S_IFREG) && info.st_size == Int64(child.bytes)) else { throw DiscFailure("挂载文件类型或大小不匹配：\(relative)") }
-                    // Validate every referenced extent, including files outside
-                    // a selected verification scope, without reading their data.
-                    guard fresh.tracks.contains(where: { $0.contains(child.lba, bytes: child.bytes) }) else {
-                        throw DiscFailure("文件区段超出完整记录轨道：\(relative)")
-                    }
-                    total += UInt64(child.bytes)
-                    guard total <= identity.bytes else { throw DiscFailure("文件总量超过介质容量，停止本次校验。") }
-                    if let paths, !paths.contains(relative) { continue }
-                    let localFD = url.map { Darwin.open($0.path, O_RDONLY | O_NOFOLLOW) } ?? -1
-                    guard mount == nil || localFD >= 0 else { throw DiscFailure("无法只读打开挂载文件：\(relative)") }
-                    defer { if localFD >= 0 { Darwin.close(localFD) } }
-                    var digest = SHA256(); var offset: UInt32 = 0
-                    while offset < child.bytes {
-                        let length = min(UInt32(1024 * 1024), child.bytes - offset)
-                        let absolute = UInt64(child.lba) + UInt64(offset / 2048)
-                        guard absolute <= UInt32.max else { throw DiscFailure("文件地址溢出。") }
-                        let optical = try read(lba: UInt32(absolute), bytes: length, tracks: fresh.tracks)
-                        if localFD >= 0 {
-                            var mounted = Data(count: Int(length))
-                            let n = mounted.withUnsafeMutableBytes { pread(localFD, $0.baseAddress!, Int(length), off_t(offset)) }
-                            guard n == length, optical == mounted else { throw DiscFailure("挂载内容与会话文件不一致：\(relative)") }
-                        }
-                        digest.update(data: optical); offset += length; processed += UInt64(length)
-                        if offset == child.bytes || offset % (16 * 1024 * 1024) == 0 { progress(relative, processed) }
-                    }
-                    result.append(VerifiedFile(path: relative, bytes: child.bytes, sha256: digest.finalize().map { String(format: "%02x", $0) }.joined()))
-                }
-            }
+        if let mount {
+            try checkSystem(dm_mount_matches(mount.path, identity.bsd), "检查只读挂载来源")
+            try MountedSessionDirectory.validate(root: mount,
+                entries: Dictionary(uniqueKeysWithValues: fresh.treeEntries.map { ($0.name, $0) }))
         }
-        try visit(fresh.volume.root, path: "", depth: 0)
+        var result: [VerifiedFile] = [], processed: UInt64 = 0
+        for child in fresh.fileEntries {
+            let relative = child.name
+            if let paths, !paths.contains(relative) { continue }
+            let url = mount?.appendingPathComponent(relative)
+            let localFD = url.map { Darwin.open($0.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) } ?? -1
+            guard mount == nil || localFD >= 0 else { throw DiscFailure("无法只读打开挂载文件：\(relative)") }
+            defer { if localFD >= 0 { Darwin.close(localFD) } }
+            if localFD >= 0 {
+                var info = stat()
+                guard fstat(localFD, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+                      info.st_size == Int64(child.bytes) else { throw DiscFailure("挂载文件在校验前发生变化。") }
+            }
+            var digest = SHA256(), offset: UInt32 = 0
+            while offset < child.bytes {
+                let length = min(UInt32(1024 * 1024), child.bytes - offset)
+                let absolute = UInt64(child.lba) + UInt64(offset / 2048)
+                guard absolute <= UInt32.max else { throw DiscFailure("文件地址溢出。") }
+                let optical = try read(lba: UInt32(absolute), bytes: length, tracks: fresh.tracks)
+                if localFD >= 0 {
+                    var mounted = Data(count: Int(length))
+                    let n = mounted.withUnsafeMutableBytes { pread(localFD, $0.baseAddress!, Int(length), off_t(offset)) }
+                    guard n == length, optical == mounted else { throw DiscFailure("挂载内容与会话文件不一致：\(relative)") }
+                }
+                digest.update(data: optical); offset += length; processed += UInt64(length)
+                if offset == child.bytes || offset % (16 * 1024 * 1024) == 0 { progress(relative, processed) }
+            }
+            result.append(VerifiedFile(path: relative, bytes: child.bytes,
+                sha256: digest.finalize().map { String(format: "%02x", $0) }.joined()))
+        }
         if let paths, Set(result.map(\.path)) != paths { throw DiscFailure("请求校验的文件不全在当前目录中。") }
         try preflight()
         if let mount { try checkSystem(dm_mount_matches(mount.path, identity.bsd), "复核挂载来源") }

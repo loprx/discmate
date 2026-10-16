@@ -7,6 +7,7 @@ struct BurnCompletion {
     enum Terminal: Equatable { case done, failed(String) }
     enum Outcome: Equatable {
         case ejected
+        case mediaReturned
         case normalEjectRequired
         case failed(String, recoveryRequired: Bool)
     }
@@ -23,6 +24,9 @@ struct BurnCompletion {
     private(set) var device: DeviceState?
     private var emptySince: TimeInterval?
     private var presentSince: TimeInterval?
+    private var observedEmptyAfterTerminal = false
+    private static let removalConfirmation: TimeInterval = 2
+    private static let fallbackEjectConfirmation: TimeInterval = 15
     let completionWait: TimeInterval
 
     init(completionWait: TimeInterval = 120) { self.completionWait = completionWait }
@@ -74,15 +78,22 @@ struct BurnCompletion {
         }
         // A real fourth-session run reported open/empty, but a new IOMedia
         // still existed and the user saw a closed tray. Require independent
-        // registry agreement, sustained after terminal. 15 s is an observation
-        // grace period, not proof of physical movement or a hardware timeout.
+        // registry agreement, sustained after terminal. The short removal
+        // confirmation avoids keeping the task locked after a real eject;
+        // the longer media-present window only gates the fallback eject.
         if let device, device.mediaAbsent && device.trayOpen && device.idle && registryMediaAbsent == true {
             if emptySince == nil { emptySince = time }
+            observedEmptyAfterTerminal = true
         } else { emptySince = nil }
+        // Once both sources saw an empty tray, a later media object may be a
+        // newly inserted disc. Never route it into the fallback eject path.
+        if terminal == .done, observedEmptyAfterTerminal, registryMediaAbsent == false {
+            return .mediaReturned
+        }
         if registryMediaAbsent == false && device?.idle == true {
             if presentSince == nil { presentSince = time }
         } else { presentSince = nil }
-        if let emptySince, time - emptySince >= 15 {
+        if let emptySince, time - emptySince >= Self.removalConfirmation {
             switch terminal {
             case .done: return .ejected
             case .failed(let detail): return .failed(detail, recoveryRequired: false)
@@ -90,7 +101,7 @@ struct BurnCompletion {
         }
         // A terminal successful backend with stable, independently observed media
         // hands off once to Disk Arbitration. This is not overall job completion.
-        if terminal == .done, let presentSince, time - presentSince >= 15 {
+        if terminal == .done, let presentSince, time - presentSince >= Self.fallbackEjectConfirmation {
             return .normalEjectRequired
         }
         guard time - terminalTime >= completionWait else { return nil }
@@ -126,7 +137,10 @@ struct BurnProgress: Sendable {
         case "DeviceStatus", "PreflightValidated": return .deviceStatusObserved
         case "SystemEject": return .ejectRequested
         case "EjectConfirmed": return .ejectCompleted
+        case "MediaReturned": return .mediaReturnedDuringCompletion
         case "PreflightFailed": return .failed
+        case "AppendPreflightFailed": return .appendPreflightRejected
+        case "AppendSourcesRevalidated": return .appendSourcesRevalidated
         default: return kind == .finishing ? .finishing : .waiting
         }
     }
