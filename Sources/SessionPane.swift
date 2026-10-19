@@ -83,7 +83,10 @@ struct SessionPane: View {
                         Spacer()
                         if let writable = snapshot.writable, snapshot.appendable {
                             Text("可用约 \(OperationEstimate.size(UInt64(writable.freeBlocks) * 2048))")
-                        } else { Text("此盘目前不可追加").foregroundStyle(.orange) }
+                        } else if snapshot.incompleteSession {
+                            Text("第 \(snapshot.latest.session) 会话未封闭；暂停追加（不代表盘片报废）")
+                                .foregroundStyle(.orange)
+                        } else { Text("当前状态不支持追加").foregroundStyle(.orange) }
                     }.font(.callout)
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
@@ -130,13 +133,17 @@ struct SessionPane: View {
 
                 HStack {
                     Button("在访达打开最新内容") { model.openLatest(bsd: bsd) }
-                        .disabled(locked || (model.snapshot == nil && bsd == nil))
-                        .help("只读挂载最新会话，可能需要 macOS 管理员授权；通常数秒，系统忙时可能更久。不会逐个读取或校验文件。请等待打开完成后再推出。")
+                        .disabled(locked || (model.snapshot == nil && bsd == nil) || model.snapshot?.incompleteSession == true)
+                        .help(model.snapshot?.incompleteSession == true
+                              ? "末次会话未封闭，不能正常挂载；可使用只读校验读取已记录文件。"
+                              : "只读挂载最新会话，可能需要 macOS 管理员授权；通常数秒，系统忙时可能更久。不会逐个读取或校验文件。请等待打开完成后再推出。")
                     Button("正常推出") { model.ejectNormally(drivePath: drivePath, bsd: bsd) }
                         .disabled(locked || bsd == nil || drivePath == nil)
                         .help("先正常卸载，再请求推出，并等待约 15 秒确认介质移除。不会刻录或强制卸载；请等托盘实际弹出。")
                 }
-                Text("macOS 默认可能显示较早内容。使用“在访达打开最新内容”只读打开最新会话；会自动检查目录，不完整读取文件正文。读回和挂载后不会自动弹盘，取盘请点击“正常推出”。")
+                Text(model.snapshot?.incompleteSession == true
+                     ? "末次会话未封闭：已记录文件可只读检查，但最新会话不能在访达正常挂载，也不能继续追加。"
+                     : "macOS 默认可能显示较早内容。使用“在访达打开最新内容”只读打开最新会话；会自动检查目录，不完整读取文件正文。读回和挂载后不会自动弹盘，取盘请点击“正常推出”。")
                     .font(.caption).foregroundStyle(.secondary)
 
                 ExpandableSection("可选：读回校验", isExpanded: $showVerification) {

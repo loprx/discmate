@@ -4,7 +4,7 @@ import CoreFoundation
 // These enums are the export boundary. Never add user-facing error strings,
 // source paths, volume labels, serials, hashes or raw backend dictionaries here.
 enum DiagnosticTaskKind: String, Codable, CaseIterable {
-    case dataBurn, append, appendPreparation, audioBurn, imageBurn, videoBurn, erase, readback, openLatest, eject, deviceRefresh
+    case dataBurn, append, appendPreparation, audioBurn, imageBurn, videoBurn, erase, readback, openLatest, eject, deviceRefresh, clipboardImport
 }
 
 enum DiagnosticMediaType: String, Codable {
@@ -29,6 +29,7 @@ enum DiagnosticEventKind: String, Codable {
     case panelFinished, panelCreationFailed, backendObservationUnavailable, backendReleased, registryObserved, deviceStatusObserved
     case preflightIdentityRejected, preflightCapabilityRejected, preflightUnavailable
     case appendSourcesChecked, appendSourcesRevalidated, appendPreflightRejected
+    case clipboardPasteShortcut, clipboardFilesSelected, clipboardTextStaged, clipboardImportFailed
     case readbackDirectoryMatched
     case readbackStarted, readbackAddedStarted, readbackFullStarted, readbackAddedSourcesMatched, readbackAllReadableKnownSourcesMatched, readbackAllReadable, readbackFailed, failed, completed, cancelled
 }

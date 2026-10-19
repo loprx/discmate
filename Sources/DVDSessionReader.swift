@@ -32,6 +32,7 @@ struct SessionSnapshot: Sendable {
     let rootEntries: [ISOEntry]
     let descriptorHash: String
     let appendable: Bool
+    var incompleteSession = false
     var recordedEntries: [ISOEntry]? = nil
     var treeEntries: [ISOEntry] { (recordedEntries ?? rootEntries).sorted { $0.name < $1.name } }
     var fileEntries: [ISOEntry] { treeEntries.filter { !$0.directory } }
@@ -73,8 +74,8 @@ final class DVDSessionReader {
         try preflight()
         var disc = DMDisc()
         try checkSystem(dm_disc(fd, &disc), "读取会话状态")
-        guard disc.status != 0, (disc.lastState == 0 || disc.lastState == 3), disc.lastTrack > 0, disc.lastTrack <= 64 else {
-            throw DiscFailure("光盘为空、会话未结束或轨道数量超出当前检查范围。")
+        guard disc.status != 0, (disc.lastState == 0 || disc.lastState == 1 || disc.lastState == 3), disc.lastTrack > 0, disc.lastTrack <= 64 else {
+            throw DiscFailure("不支持当前光盘状态：discStatus=\(disc.status)、lastState=\(disc.lastState)、lastTrack=\(disc.lastTrack)。")
         }
         var tracks: [RecordedTrack] = []
         for number in 1...disc.lastTrack {
@@ -88,7 +89,8 @@ final class DVDSessionReader {
                                         blank: raw.blank != 0, damaged: raw.damaged != 0,
                                         nextWritable: raw.nwaValid != 0 ? raw.nwa : nil, freeBlocks: raw.freeBlocks))
         }
-        let latest = try ISO9660.latestCompleted(tracks, emptyLastSession: disc.lastState == 0 ? disc.sessions : nil)
+        let readable = try ISO9660.readableTracks(tracks, lastState: disc.lastState)
+        let latest = try ISO9660.latestCompleted(readable, emptyLastSession: disc.lastState == 0 ? disc.sessions : nil)
         var primary: ISOVolume?; var joliet: ISOVolume?; var descriptors = Data(); var terminated = false
         for offset: UInt32 in 16..<48 {
             let position = UInt64(latest.start) + UInt64(offset)
@@ -100,13 +102,14 @@ final class DVDSessionReader {
             if data[0] == 255 { terminated = true; break }
         }
         guard terminated, primary != nil, let volume = joliet ?? primary else { throw DiscFailure("ISO 卷描述符不完整。") }
-        let tree = try RecordedDirectoryTree.scan(root: volume.root, tracks: tracks, capacityBytes: identity.bytes) {
-            try self.directory($0, volume: volume, tracks: tracks)
+        let tree = try RecordedDirectoryTree.scan(root: volume.root, tracks: readable, capacityBytes: identity.bytes) {
+            try self.directory($0, volume: volume, tracks: readable)
         }
         let entries = tree.filter { !$0.name.contains("/") }
         try preflight()
-        return SessionSnapshot(identity: identity, tracks: tracks, latest: latest, volume: volume, rootEntries: entries,
-                               descriptorHash: hash(descriptors), appendable: disc.status == 1, recordedEntries: tree)
+        return SessionSnapshot(identity: identity, tracks: readable, latest: latest, volume: volume, rootEntries: entries,
+                               descriptorHash: hash(descriptors), appendable: disc.status == 1 && disc.lastState != 1,
+                               incompleteSession: disc.lastState == 1, recordedEntries: tree)
     }
     private func read(lba: UInt32, bytes: UInt32, tracks: [RecordedTrack]) throws -> Data {
         guard bytes <= 1024 * 1024, tracks.contains(where: { $0.contains(lba, bytes: bytes) }) else {

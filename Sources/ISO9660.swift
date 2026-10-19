@@ -103,4 +103,18 @@ enum ISO9660 {
         }
         return last
     }
+
+    /// An interrupted DVD+R close may leave a readable data track followed by
+    /// an open incremental track in the same session. Exclude that open track
+    /// from every read bound and never advertise the disc as appendable.
+    static func readableTracks(_ tracks: [RecordedTrack], lastState: UInt32) throws -> [RecordedTrack] {
+        guard lastState == 1 else { return tracks }
+        guard let open = tracks.last, open.nextWritable != nil, !open.blank, !open.damaged,
+              let data = tracks.dropLast().last, data.session == open.session,
+              !data.blank, !data.damaged, data.nextWritable == nil,
+              tracks.filter({ $0.session == open.session }).count == 2 else {
+            throw DiscFailure("末次会话未封闭，且不能安全确定已记录数据轨道；已停止只读恢复。")
+        }
+        return Array(tracks.dropLast())
+    }
 }

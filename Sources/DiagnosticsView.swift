@@ -150,6 +150,7 @@ struct DiagnosticsView: View {
         case .openLatest: return "打开最新会话"
         case .eject: return "推出"
         case .deviceRefresh: return "刷新设备"
+        case .clipboardImport: return "从剪贴板添加"
         }
     }
 

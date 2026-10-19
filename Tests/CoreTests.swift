@@ -13,6 +13,7 @@ struct CoreTests {
         try await DiagnosticPreviewTests.run()
         try RecordedDirectoryTreeTests.run()
         try AppendSourceTreeTests.run()
+        try ClipboardSourcesTests.run()
         try MountedSessionDirectoryTests.run()
         try await AppendDiagnosticsTests.run()
         do {
@@ -33,6 +34,22 @@ struct CoreTests {
         let pending = RecordedTrack(number: 3, session: 3, start: 5000, blocks: 10000, blank: true, damaged: false, nextWritable: 5000, freeBlocks: 10000)
         let selected = try ISO9660.latestCompleted([first, second, pending], emptyLastSession: 3)
         precondition(selected == second)
+        let interruptedData = RecordedTrack(number: 5, session: 5, start: 714544, blocks: 464,
+                                            blank: false, damaged: false, nextWritable: nil, freeBlocks: 0)
+        let interruptedOpen = RecordedTrack(number: 6, session: 5, start: 715024, blocks: 1580080,
+                                            blank: false, damaged: false, nextWritable: 716032, freeBlocks: 1579072)
+        let recoverable = try ISO9660.readableTracks([first, interruptedData, interruptedOpen], lastState: 1)
+        precondition(recoverable == [first, interruptedData])
+        let recoveredLatest = try ISO9660.latestCompleted(recoverable, emptyLastSession: nil)
+        precondition(recoveredLatest == interruptedData)
+        reject("incomplete session without an open final track") {
+            _ = try ISO9660.readableTracks([first, interruptedData], lastState: 1)
+        }
+        reject("incomplete session with damaged data track") {
+            let bad = RecordedTrack(number: 5, session: 5, start: 714544, blocks: 464,
+                                    blank: false, damaged: true, nextWritable: nil, freeBlocks: 0)
+            _ = try ISO9660.readableTracks([first, bad, interruptedOpen], lastState: 1)
+        }
         precondition(second.contains(2975, bytes: 2048))
         precondition(!second.contains(2975, bytes: 2049))
         precondition(!second.contains(2511, bytes: 1))

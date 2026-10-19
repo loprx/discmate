@@ -14,6 +14,7 @@ xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   "$project_dir/Sources/MountedSessionDirectory.swift" "$project_dir/Tests/MountedSessionDirectoryTests.swift" \
   "$project_dir/Sources/TestAppendService.swift" "$project_dir/Tests/CoreTests.swift" \
   "$project_dir/Sources/AppendSourceTree.swift" \
+  "$project_dir/Sources/ClipboardSources.swift" "$project_dir/Tests/ClipboardSourcesTests.swift" \
   "$project_dir/Tests/AppendSourceTreeTests.swift" \
   "$project_dir/Sources/AppendDiagnostics.swift" "$project_dir/Tests/AppendDiagnosticsTests.swift" \
   "$project_dir/Tests/AppendProofTests.swift" \
@@ -31,7 +32,7 @@ xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   "$project_dir/Sources/IncrementalISO.swift" "$project_dir/Tests/IncrementalISOTests.swift" \
   "$project_dir/Tests/FolderIntegrationTests.swift" \
   "$project_dir/Sources/ISOTrackLayout.swift" \
-  "$test_dir/bridge.o" -framework IOKit -framework DiskArbitration -framework DiscRecording -o "$test_dir/core-tests"
+  "$test_dir/bridge.o" -framework AppKit -framework IOKit -framework DiskArbitration -framework DiscRecording -o "$test_dir/core-tests"
 "$test_dir/core-tests" "$@"
 
 # Real UI owner with an injected backend; never accesses optical hardware.

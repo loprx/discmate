@@ -73,6 +73,8 @@ struct ContentView: View {
     @State private var cachedDiscDescription = "连接刻录机后刷新。"
     @State private var job: Job = .data
     @State private var filesByJob: [Job: [URL]] = [:]
+    @State private var stagedClipboardText: Set<URL> = []
+    @State private var clipboardImporting = false
     @State private var selectedDrive = 0
     @State private var discName = "DATA"
     @State private var keepAppendable = true
@@ -214,14 +216,20 @@ struct ContentView: View {
                             HStack {
                                 Button(job == .video ? "选择 VIDEO_TS 文件夹…" : "添加文件或文件夹…") { chooseFiles() }
                                     .help("选择本机文件加入待刻录列表；不会写入光盘。开始前会检查容量和文件是否可读。")
-                                Button("清空列表") { filesByJob[job] = [] }.disabled(files.isEmpty)
+                                if job == .data {
+                                    Button(clipboardImporting ? "正在添加…" : "从剪贴板添加") { pasteClipboardIntoDataList() }
+                                        .disabled(locked || clipboardImporting)
+                                        .keyboardShortcut("v", modifiers: .command)
+                                        .help("添加访达复制的本机文件/文件夹，或将不超过 1 MiB 的纯文本保存为待刻录 TXT。也可在本窗口按 ⌘V。通常数秒，不写盘；刻录前仍需查看摘要并确认。")
+                                }
+                                Button("清空列表") { clearSelectedFiles() }.disabled(files.isEmpty || locked || clipboardImporting)
                                     .help("仅移除列表中的待刻录项目，不删除源文件或盘上内容。")
                                 Spacer()
                                 Text("已选 \(files.count) 个顶层项目 · \(selectedSizeText)")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             if files.isEmpty {
-                                Text(appendMode ? "选择或拖入新增文件、文件夹。盘上旧内容会保留，不需重新添加。" : "添加内容后，查看设置并开始刻录。")
+                                Text(appendMode ? "选择或拖入新增文件、文件夹，也可按 ⌘V 粘贴。盘上旧内容会保留，不需重新添加。" : "选择或拖入文件、文件夹，也可按 ⌘V 粘贴。添加后查看设置并开始刻录。")
                                     .foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 70, alignment: .center)
                             } else {
                                 ScrollView {
@@ -236,9 +244,9 @@ struct ContentView: View {
                                                 Spacer()
                                                 Text(directoryURLs.contains(file) ? "目录内大小待检查" : (fileSizes[file].map(OperationEstimate.size) ?? "大小待检查"))
                                                     .font(.caption).foregroundStyle(.secondary)
-                                                Button { filesByJob[job]?.removeAll { $0 == file } } label: {
+                                                Button { removeSelectedFile(file) } label: {
                                                     Image(systemName: "xmark.circle.fill")
-                                                }.buttonStyle(.borderless).accessibilityLabel("移除 \(file.lastPathComponent)")
+                                                }.buttonStyle(.borderless).disabled(locked || clipboardImporting).accessibilityLabel("移除 \(file.lastPathComponent)")
                                                     .help("从待刻录列表移除此项目，不删除源文件。")
                                             }.padding(.vertical, 7)
                                             Divider()
@@ -472,7 +480,7 @@ struct ContentView: View {
     }
 
     private func addSelectedURLs(_ urls: [URL]) {
-        guard !locked else { return }
+        guard !locked, !clipboardImporting else { return }
         selectionRevision = UUID()
         if job == .image || job == .video {
             filesByJob[job] = urls
@@ -487,8 +495,79 @@ struct ContentView: View {
         if job == .data { refresh(source: .fileSelection) }
     }
 
+    private func pasteClipboardIntoDataList() {
+        // A window shortcut can outrank the standard Edit > Paste command.
+        // Keep text entry behavior when the disc-name field owns focus.
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isEditable {
+            editor.paste(nil)
+            return
+        }
+        addFromClipboard(shortcut: NSApp.currentEvent?.type == .keyDown)
+    }
+
+    private func addFromClipboard(shortcut: Bool = false) {
+        guard job == .data, !locked, !clipboardImporting else { return }
+        let source: ClipboardSource
+        do { source = try ClipboardSource.readPasteboard() }
+        catch { status = error.localizedDescription; recordClipboardFailure(error, shortcut: shortcut); return }
+        switch source {
+        case .files(let urls):
+            let id = DiagnosticReportStore.shared.startTask(kind: .clipboardImport, fileCount: urls.count)
+            if shortcut { DiagnosticReportStore.shared.record(taskID: id, event: .clipboardPasteShortcut) }
+            addSelectedURLs(urls)
+            DiagnosticReportStore.shared.record(taskID: id, event: .clipboardFilesSelected)
+            DiagnosticReportStore.shared.finish(taskID: id, outcome: .completed)
+            status = "已从剪贴板添加 \(urls.count) 个本机项目。请查看列表；选择或准备摘要时会检查来源与名称。不写盘。"
+        case .text(let data):
+            clipboardImporting = true
+            let id = DiagnosticReportStore.shared.startTask(kind: .clipboardImport, fileCount: 1, totalBytes: UInt64(data.count))
+            if shortcut { DiagnosticReportStore.shared.record(taskID: id, event: .clipboardPasteShortcut) }
+            Task {
+                do {
+                    let url = try await Task.detached(priority: .utility) { try ClipboardSource.stageText(data) }.value
+                    guard job == .data, !locked else {
+                        try? ClipboardSource.discardText(at: url)
+                        throw ClipboardSourceError.unsupported
+                    }
+                    stagedClipboardText.insert(url)
+                    clipboardImporting = false
+                    addSelectedURLs([url])
+                    DiagnosticReportStore.shared.record(taskID: id, event: .clipboardTextStaged)
+                    DiagnosticReportStore.shared.finish(taskID: id, outcome: .completed)
+                    status = "已将剪贴板文字保存为待刻录 TXT（\(OperationEstimate.size(UInt64(data.count)))）。请查看列表和刻录摘要；此时没有写盘。"
+                } catch {
+                    clipboardImporting = false
+                    status = "剪贴板文字添加失败：\(error.localizedDescription)"
+                    DiagnosticReportStore.shared.record(taskID: id, event: .clipboardImportFailed, error: error as NSError)
+                    DiagnosticReportStore.shared.finish(taskID: id, outcome: .failed)
+                }
+            }
+        }
+    }
+
+    private func recordClipboardFailure(_ error: Error, shortcut: Bool = false) {
+        let id = DiagnosticReportStore.shared.startTask(kind: .clipboardImport)
+        if shortcut { DiagnosticReportStore.shared.record(taskID: id, event: .clipboardPasteShortcut) }
+        DiagnosticReportStore.shared.record(taskID: id, event: .clipboardImportFailed, error: error as NSError)
+        DiagnosticReportStore.shared.finish(taskID: id, outcome: .failed)
+    }
+
+    private func removeSelectedFile(_ url: URL) {
+        guard !locked, !clipboardImporting else { return }
+        filesByJob[job]?.removeAll { $0 == url }
+        if stagedClipboardText.remove(url) != nil {
+            do { try ClipboardSource.discardText(at: url) }
+            catch { status = "待刻录项目已移除，但临时文本清理失败：\(error.localizedDescription)" }
+        }
+    }
+
+    private func clearSelectedFiles() {
+        guard !locked, !clipboardImporting else { return }
+        for url in files { removeSelectedFile(url) }
+    }
+
     private func runJob() {
-        guard !isRefreshing, !coordinator.isOccupied, !sessions.blocksDeviceOperations, !nativeTask.isBusy, let drive else { return }
+        guard !clipboardImporting, !isRefreshing, !coordinator.isOccupied, !sessions.blocksDeviceOperations, !nativeTask.isBusy, let drive else { return }
         if job == .info {
             refresh()
             return

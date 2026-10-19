@@ -219,8 +219,11 @@ final class SessionModel: ObservableObject {
             }.value
             self.snapshot = snapshot
             self.recordDisc(snapshot)
-            self.transition(.ready, "已识别第 \(snapshot.latest.session) 会话，共 \(snapshot.rootEntries.count) 个根目录项目。")
-            self.log("media=\(snapshot.identity.registryID) bsd=\(bsd) session=\(snapshot.latest.session) start=\(snapshot.latest.start) descriptor=\(snapshot.descriptorHash)")
+            let status = snapshot.incompleteSession
+                ? "第 \(snapshot.latest.session) 会话未封闭；已只读识别 \(snapshot.rootEntries.count) 个根目录项目。为避免继续写入，已暂停追加；这不代表盘片报废。"
+                : "已识别第 \(snapshot.latest.session) 会话，共 \(snapshot.rootEntries.count) 个根目录项目。"
+            self.transition(.ready, status)
+            self.log("media=\(snapshot.identity.registryID) bsd=\(bsd) session=\(snapshot.latest.session) start=\(snapshot.latest.start) incomplete=\(snapshot.incompleteSession) descriptor=\(snapshot.descriptorHash)")
             for entry in snapshot.rootEntries { self.log("extent name=\(entry.name) lba=\(entry.lba) bytes=\(entry.bytes)") }
             self.watchIdentity()
         }
@@ -241,6 +244,9 @@ final class SessionModel: ObservableObject {
     func openLatest(bsd: String? = nil) {
         start(kind: .openLatest) {
             let expected = try await self.snapshotForReading(bsd: bsd)
+            guard !expected.incompleteSession else {
+                throw DiscFailure("末次会话未封闭，无法作为正常光盘挂载；可使用“直接读回校验”检查已记录文件。")
+            }
             self.verified = []; self.mountedURL = nil
             self.transition(.inspecting, "正在复核盘片身份和最新会话…")
             let fresh = try await Task.detached { try DVDSessionReader(identity: expected.identity).scan() }.value

@@ -64,6 +64,24 @@ enum DiagnosticReportTests {
         precondition(preflightReport.outcome == .failed)
         precondition(!String(decoding: preflightData, as: UTF8.self).contains(secret))
 
+        let clipboard = store.startTask(kind: .clipboardImport, fileCount: 1, totalBytes: UInt64(secret.utf8.count))
+        store.record(taskID: clipboard, event: .clipboardPasteShortcut)
+        store.record(taskID: clipboard, event: .clipboardTextStaged)
+        store.finish(taskID: clipboard, outcome: .completed)
+        let clipboardData = try await store.exportData(taskID: clipboard)
+        let clipboardReport = try decode(clipboardData)
+        precondition(clipboardReport.task == .clipboardImport && clipboardReport.fileCount == 1)
+        precondition(clipboardReport.events.map(\.kind) == [.started, .clipboardPasteShortcut, .clipboardTextStaged])
+        precondition(!String(decoding: clipboardData, as: UTF8.self).contains(secret))
+        let clipboardFailure = store.startTask(kind: .clipboardImport)
+        store.record(taskID: clipboardFailure, event: .clipboardImportFailed,
+                     error: NSError(domain: secret, code: 13, userInfo: [NSLocalizedDescriptionKey: secret]))
+        store.finish(taskID: clipboardFailure, outcome: .failed)
+        let failureData = try await store.exportData(taskID: clipboardFailure)
+        let failureReport = try decode(failureData)
+        precondition(failureReport.outcome == .failed)
+        precondition(!String(decoding: failureData, as: UTF8.self).contains(secret))
+
         // Reject malicious numeric fields and preserve genuine hexadecimal codes.
         for candidate: Any in ["123 \(secret)", "12.5", "１", "18446744073709551616", true, " 1", "1\n"] {
             precondition(DiagnosticErrorCode.extract(error: nil, backendError: ["DRErrorStatusErrorKey": candidate]).isEmpty)
@@ -90,7 +108,7 @@ enum DiagnosticReportTests {
         // unfinished task to success. Export includes exactly one selected task.
         let restarted = DiagnosticReportStore(directory: root)
         let recovered = await restarted.reports()
-        precondition(recovered.count == 3 && recovered.first?.outcome == .failed)
+        precondition(recovered.count == 5 && recovered.first?.outcome == .failed)
         let recoveredData = try await restarted.exportData(taskID: first)
         precondition(recoveredData == data)
         let attrs = try FileManager.default.attributesOfItem(atPath: root.appendingPathComponent("history.json").path)
