@@ -27,6 +27,38 @@ private struct BurnDrive: Sendable {
     let originalMediaID: UInt64
 }
 
+/// The system can report an empty/open tray while the physical tray stays
+/// closed. This one-shot command only targets the original, currently empty
+/// drive. openTray refuses a drive that contains media; never eject a new disc.
+private enum DiscTrayOpenService {
+    static func openEmptyTray(path: String, driveID: UInt64) throws {
+        precondition(!Thread.isMainThread)
+        func confirmEmpty() throws {
+            var current: UInt64 = 0
+            let identityStatus = dm_registry_identity(path, &current)
+            if identityStatus == ENXIO {
+                throw BurnDriveDisconnected(detail: "打开托盘前原光驱已断开；未确认实际弹出。重新连接后请只读核验。")
+            }
+            try checkSystem(identityStatus, "复核原光驱身份")
+            guard current == driveID else { throw BurnRecoveryRequired(detail: "光驱身份已变化，未打开托盘。") }
+            var present: Int32 = -1
+            try checkSystem(dm_registry_has_media(path, &present), "复核托盘内介质")
+            guard present == 0 else { throw BurnRecoveryRequired(detail: "光驱内已出现介质，未再次发出推出命令。") }
+        }
+        try confirmEmpty()
+        guard let device = (DRDevice.devices() as? [DRDevice])?.first(where: { $0.ioRegistryEntryPath() == path }),
+              device.isValid() else { throw BurnRecoveryRequired(detail: "原光驱不可用，未打开托盘。") }
+        let status = device.status() as NSDictionary
+        try confirmEmpty()
+        guard (status[DRDeviceIsBusyKey] as? NSNumber)?.boolValue == false,
+              status[DRDeviceMediaStateKey] as? String == DRDeviceMediaStateNone else {
+            throw BurnRecoveryRequired(detail: "光驱状态非空闲无盘，未打开托盘。")
+        }
+        guard device.openTray() else { throw BurnRecoveryRequired(detail: "光驱拒绝打开托盘请求；请检查实际状态。") }
+        try confirmEmpty()
+    }
+}
+
 /// Owns all burn objects on one dedicated thread with a serviced run loop.
 /// DRNotificationCenter is run-loop-local (DRNotificationCenter.h); never use
 /// NotificationCenter.default or a detached Swift task without a run loop here.
@@ -261,7 +293,7 @@ private final class DiscBurnWorker: NSObject {
             completion.backendEnded(state == DRStatusStateDone ? .done : .failed(error), at: lastActivity)
             if first {
                 emit(.finishing, state: state,
-                     detail: "系统刻录任务结束，正在确认介质移除；检测到空仓后约 2 秒完成确认。请等任务解锁后再合仓；尚未读回。")
+                     detail: "系统刻录任务结束，正在确认介质移除并完成托盘打开；请等任务解锁后再合仓，尚未读回。")
             }
         }
     }
@@ -371,7 +403,8 @@ private final class DiscBurnWorker: NSObject {
                 return
             }
             result = completion.outcome(at: now, driveStillRegistered: registered,
-                                        registryMediaAbsent: registryStatus == 0 ? present == 0 : nil)
+                                        registryMediaAbsent: registryStatus == 0 ? present == 0 : nil,
+                                        driveDefinitelyAbsent: identityStatus == ENXIO && afterStatus == ENXIO)
         } else if !warned && now - lastActivity >= 120 {
             warned = true
             emit(.warning, state: lastBackend, detail: "已等待系统状态更新 120 秒；任务仍受控，不代表底层命令已停止。")
@@ -411,13 +444,36 @@ enum DiscBurnService {
         for await event in stream {
             switch event {
             case .progress(let update): progress(update)
-            case .finished(.ejected, _):
-                progress(BurnProgress(kind: .finishing, state: "EjectConfirmed", fraction: nil, detail: "持续介质移除检查通过；请确认实际托盘。"))
+            case .finished(.emptyDriveObserved, let drive):
+                // Empty IOMedia and DiscRecording's tray flag have falsely
+                // reported an open tray on this drive. Request one actual tray
+                // open after the burn objects are gone, then report the result.
+                guard let drive else { throw BurnRecoveryRequired(detail: "缺少原光驱身份，未请求打开托盘。") }
+                progress(BurnProgress(kind: .finishing, state: "TrayOpenRequested", fraction: nil,
+                    detail: "介质移除已确认；正在向原光驱请求打开托盘，尚未确认实际弹出。"))
+                do {
+                    try await Task.detached {
+                        try DiscTrayOpenService.openEmptyTray(path: drive.path, driveID: drive.registryID)
+                    }.value
+                } catch let error as BurnDriveDisconnected {
+                    throw error
+                } catch {
+                    let code = DiagnosticErrorCode.extract(error: error as NSError, backendError: nil).first
+                    progress(BurnProgress(kind: .warning, state: "TrayOpenFailed", fraction: nil,
+                        detail: error.localizedDescription, errorCode: code?.code, errorSource: code?.source ?? .other))
+                    throw BurnRecoveryRequired(detail: "系统刻录已结束，但托盘打开请求失败：\(error.localizedDescription) 请检查实际光盘状态，勿重复刻录。")
+                }
+                progress(BurnProgress(kind: .finishing, state: "TrayOpenAccepted", fraction: nil,
+                    detail: "原光驱已接受一次打开托盘请求；请确认光盘实际弹出。"))
                 return
             case .finished(.mediaReturned, _):
                 progress(BurnProgress(kind: .finishing, state: "MediaReturned", fraction: nil,
                     detail: "收尾期间介质重新出现；已停止后备推出，未确认当前盘片身份。请只读重新识别。"))
                 return
+            case .finished(.driveDisconnected, _):
+                progress(BurnProgress(kind: .warning, state: "DriveDisconnected", fraction: nil,
+                    detail: "刻录后端已结束，原光驱已断开；未确认弹出或读回。重新连接后请刷新设备并只读核验。"))
+                throw BurnDriveDisconnected(detail: "光驱已断开，本次写入结果尚未读回确认。重新连接后请刷新设备并只读核验。")
             case .finished(.normalEjectRequired, let drive):
                 // The worker's autorelease pool and registrations are gone. The
                 // enclosing SessionModel still owns the one device task. Resolve
@@ -440,6 +496,8 @@ enum DiscBurnService {
                     }
                     progress(BurnProgress(kind: .finishing, state: "EjectConfirmed", fraction: nil, detail: "普通推出及持续介质移除检查通过；请确认实际托盘。"))
                     return
+                } catch let error as BurnDriveDisconnected {
+                    throw error
                 } catch {
                     let code = DiagnosticErrorCode.extract(error: error as NSError, backendError: nil).first
                     progress(BurnProgress(kind: .warning, state: "EjectFailed", fraction: nil, detail: error.localizedDescription, errorCode: code?.code, errorSource: code?.source ?? .other))

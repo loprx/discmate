@@ -7,7 +7,8 @@ final class SessionModel: ObservableObject {
     static let shared = SessionModel()
     enum Phase: String { case idle, inspecting, preparing, prepared, burning, finishing, recoveryRequired, awaitingReload, authorizing, unmounting, mounting, verifying, ready, failed }
     @Published private(set) var phase: Phase = .idle
-    @Published private(set) var message = "添加要刻录的文件或文件夹，然后点击“查看追加摘要”。只检查旧目录，不完整读取旧文件。"
+    @Published private(set) var message = "添加要刻录的文件或文件夹，然后点击“查看刻录摘要”。只检查旧目录，不完整读取旧文件。"
+    @Published private(set) var appendPreparationFailure: String?
     @Published private var deviceCache = SessionDeviceCache()
     private(set) var snapshot: SessionSnapshot? {
         get { deviceCache.snapshot }
@@ -36,9 +37,17 @@ final class SessionModel: ObservableObject {
     @Published private(set) var progressFraction: Double?
     @Published private(set) var remainingEstimate: String?
     @Published private(set) var actualBurnSpeedKBps: Double?
-    var canVerifyAdded: Bool { pendingProof?.preserved != nil }
+    // A proof survives eject/reload for readback, but belongs to one recorded
+    // session. Never offer an old disc's proof for a newly inserted disc.
+    var canVerifyAdded: Bool {
+        guard let proof = pendingProof, proof.preserved != nil, let snapshot else { return false }
+        return proof.targets(snapshot)
+    }
     var verificationBytes: UInt64 { snapshot?.fileEntries.reduce(0) { $0 + UInt64($1.bytes) } ?? 0 }
-    var addedVerificationBytes: UInt64 { pendingProof?.files.reduce(0) { $0 + $1.bytes } ?? 0 }
+    var addedVerificationBytes: UInt64 {
+        guard canVerifyAdded else { return 0 }
+        return pendingProof?.files.reduce(0) { $0 + $1.bytes } ?? 0
+    }
     private var task: Task<Void, Never>?
     private var diagnosticTaskID: UUID?
     private let coordinator: DeviceTaskCoordinator
@@ -151,6 +160,7 @@ final class SessionModel: ObservableObject {
     func invalidatePreparedPlan() {
         guard !isBusy else { return }
         discardPreparedPlan()
+        appendPreparationFailure = nil
         if phase == .prepared { transition(.ready, "文件选择已变化，请重新准备增量镜像。") }
     }
     private func discardPreparedPlan(preserving image: URL? = nil) {
@@ -206,7 +216,7 @@ final class SessionModel: ObservableObject {
     func reset() {
         guard !blocksDeviceOperations else { return }
         invalidateDeviceCache(); phase = .idle
-        message = "添加要刻录的文件或文件夹，然后点击“查看追加摘要”。只检查旧目录，不完整读取旧文件。"
+        message = "添加要刻录的文件或文件夹，然后点击“查看刻录摘要”。只检查旧目录，不完整读取旧文件。"
     }
     func inspect(bsd: String?) {
         guard let bsd else { message = "请先选择已放入光盘的刻录机。"; return }
@@ -379,7 +389,7 @@ final class SessionModel: ObservableObject {
             self.diagnostic(.appendSourcesChecked, evidence: AppendDiagnostics.summary(prepared))
             self.log("oldPayloadReadBytes=0; old hashes not reused; INCREMENTAL_PREPARED imageBytes=\(prepared.imageBytes) referencedBytes=\(prepared.referencedBytes) start=\(prepared.proof.expectedStart) imageSHA256=\(prepared.imageSHA256)")
             for entry in snapshot.fileEntries { self.log("old_extent name=\(entry.name) lba=\(entry.lba) bytes=\(entry.bytes)") }
-            self.transition(.prepared, "已准备新增 \(prepared.addedFileCount) 个文件、\(prepared.addedDirectoryCount) 个目录，保留 \(prepared.preservedFileCount) 个旧文件；镜像约 \(prepared.imageBytes / 1024) KiB。尚未写盘。确认摘要后点击“开始追加”。")
+            self.transition(.prepared, "已准备新增 \(prepared.addedFileCount) 个文件、\(prepared.addedDirectoryCount) 个目录，保留 \(prepared.preservedFileCount) 个旧文件；镜像约 \(prepared.imageBytes / 1024) KiB。尚未写盘。确认摘要后点击“开始刻录”。")
         }
     }
 
@@ -472,7 +482,7 @@ final class SessionModel: ObservableObject {
                 (selectedVerification ? "已请求系统校验，但未记录到校验阶段" : "未请求系统写后校验")
             let finish = mediaReturnedDuringCompletion
                 ? "写入结束，但收尾期间介质重新出现；未执行后备推出，也未确认当前盘片。请先只读重新识别。"
-                : "写入结束，系统介质移除检查通过；请确认托盘已弹出。合仓后刷新设备，可只校验本次新增文件。"
+                : "写入结束，系统已接受托盘打开请求或正常推出；请确认光盘实际弹出。合仓后刷新设备，可只校验本次新增文件。"
             self.transition(.awaitingReload, "\(finish)\(verification)；尚未完成重新装盘读回。")
         }
     }
@@ -503,6 +513,18 @@ final class SessionModel: ObservableObject {
             self.transition(.awaitingReload, "正常推出回调及持续介质移除检查通过，请确认实际托盘状态。此结果不代表刻录自动结束已修复。")
         }
     }
+    func ejectBlankDisc(drivePath: String?) {
+        guard let drivePath, !blocksDeviceOperations else { return }
+        start(kind: .eject) {
+            self.transition(.finishing, "正在正常推出空白盘；不会刻录或强制卸载。")
+            try await BlankDiscEjectService.eject(drivePath: drivePath) {
+                self.diagnostic(.ejectRequested)
+            }
+            self.diagnostic(.ejectCompleted)
+            self.invalidateDeviceCache()
+            self.transition(.awaitingReload, "空白盘推出请求已接受，持续无介质检查通过；请确认托盘实际弹出。")
+        }
+    }
     private func start(kind: DiagnosticTaskKind = .deviceRefresh, fileCount: Int? = nil,
                        totalBytes: UInt64? = nil, preserving image: URL? = nil,
                        _ operation: @escaping @MainActor () async throws -> Void) {
@@ -510,6 +532,7 @@ final class SessionModel: ObservableObject {
         guard deviceGate.beginOperation() else { coordinator.finish(lease); return }
         diagnosticTaskID = DiagnosticReportStore.shared.startTask(kind: kind, media: diagnosticMediaType, driveModel: diagnosticDriveModel, fileCount: fileCount, totalBytes: totalBytes)
         recoveryNotice = nil
+        if kind == .appendPreparation { appendPreparationFailure = nil }
         discardPreparedPlan(preserving: image)
         taskStartedAt = Date(); progressFraction = nil; remainingEstimate = nil
         logURL = FileManager.default.temporaryDirectory.appendingPathComponent("discmate-\(UUID().uuidString).log")
@@ -525,6 +548,12 @@ final class SessionModel: ObservableObject {
             var recoveryRequired = false
             var outcome: DiagnosticOutcome = .completed
             do { try await operation() }
+            catch let error as BurnDriveDisconnected {
+                outcome = .failed
+                self.invalidateDeviceCache()
+                self.diagnostic(.deviceUnavailable, error: error as NSError)
+                self.transition(.failed, error.localizedDescription)
+            }
             catch let error as BurnRecoveryRequired {
                 recoveryRequired = true; outcome = .needsRecovery
                 self.diagnostic(.recoveryRequired, error: error as NSError)
@@ -536,6 +565,7 @@ final class SessionModel: ObservableObject {
                 if kind == .appendPreparation || (kind == .append && error is AppendPreflightFailure) {
                     self.recordAppendFailure(error)
                 }
+                if kind == .appendPreparation { self.appendPreparationFailure = error.localizedDescription }
                 self.diagnostic(.failed, error: error as NSError)
                 self.transition(.failed, error.localizedDescription)
             }

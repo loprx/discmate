@@ -140,6 +140,7 @@ struct DiagnosticsView: View {
     private func taskLabel(_ kind: DiagnosticTaskKind) -> String {
         switch kind {
         case .dataBurn: return "首次数据刻录"
+        case .firstBurnSummary: return "查看首次刻录摘要"
         case .append: return "追加刻录"
         case .appendPreparation: return "准备追加摘要"
         case .audioBurn: return "音频刻录"
@@ -150,6 +151,7 @@ struct DiagnosticsView: View {
         case .openLatest: return "打开最新会话"
         case .eject: return "推出"
         case .deviceRefresh: return "刷新设备"
+        case .refreshRequest: return "手动刷新请求"
         case .clipboardImport: return "从剪贴板添加"
         }
     }

@@ -6,9 +6,10 @@ import DiscRecording
 struct BurnCompletion {
     enum Terminal: Equatable { case done, failed(String) }
     enum Outcome: Equatable {
-        case ejected
+        case emptyDriveObserved
         case mediaReturned
         case normalEjectRequired
+        case driveDisconnected
         case failed(String, recoveryRequired: Bool)
     }
     struct DeviceState: Equatable {
@@ -24,6 +25,7 @@ struct BurnCompletion {
     private(set) var device: DeviceState?
     private var emptySince: TimeInterval?
     private var presentSince: TimeInterval?
+    private var driveAbsentSince: TimeInterval?
     private var observedEmptyAfterTerminal = false
     private static let removalConfirmation: TimeInterval = 2
     private static let fallbackEjectConfirmation: TimeInterval = 15
@@ -61,10 +63,22 @@ struct BurnCompletion {
         emptySince = nil; presentSince = nil
     }
 
-    mutating func outcome(at time: TimeInterval, driveStillRegistered: Bool, registryMediaAbsent: Bool?) -> Outcome? {
+    mutating func outcome(at time: TimeInterval, driveStillRegistered: Bool, registryMediaAbsent: Bool?, driveDefinitelyAbsent: Bool = false) -> Outcome? {
         // Even disconnect/timeout cannot release a job whose backend hasn't ended.
         guard let terminal, let terminalTime else { return nil }
         if !driveStillRegistered { observationUnavailable() }
+        // ENXIO from two registry lookups means the original drive path is gone.
+        // Release only after the backend ended and absence remained stable. This
+        // is not evidence that the disc was ejected or that its data was read back.
+        if driveDefinitelyAbsent {
+            if driveAbsentSince == nil { driveAbsentSince = time }
+            if let driveAbsentSince, time - driveAbsentSince >= 3 {
+                if case .failed(let error) = terminal {
+                    return .failed("系统刻录失败：\(error)。原光驱已断开；重新连接后请只读核验。", recoveryRequired: false)
+                }
+                return .driveDisconnected
+            }
+        } else { driveAbsentSince = nil }
         if lostDuringWrite || disconnected {
             // A transient lookup/notification is not proof of a physical unplug.
             // Keep the existing deadline and ownership, without issuing commands.
@@ -95,7 +109,7 @@ struct BurnCompletion {
         } else { presentSince = nil }
         if let emptySince, time - emptySince >= Self.removalConfirmation {
             switch terminal {
-            case .done: return .ejected
+            case .done: return .emptyDriveObserved
             case .failed(let detail): return .failed(detail, recoveryRequired: false)
             }
         }
@@ -130,12 +144,14 @@ struct BurnProgress: Sendable {
         case DRStatusStateVerifying: return .verifying
         case DRStatusStateDone: return .backendDone
         case DRStatusStateFailed: return .backendFailed
-        case "DeviceUnavailable", "DeviceIdentityPending": return .deviceUnavailable
+        case "DeviceUnavailable", "DeviceIdentityPending", "DriveDisconnected": return .deviceUnavailable
         case "SameDeviceReturned", "SameDeviceStatusRefreshed": return .deviceAvailable
         case "BackendReleased": return .backendReleased
         case "RegistryMedia": return .registryObserved
         case "DeviceStatus", "PreflightValidated": return .deviceStatusObserved
-        case "SystemEject": return .ejectRequested
+        case "SystemEject", "TrayOpenRequested": return .ejectRequested
+        case "TrayOpenAccepted": return .trayOpenAccepted
+        case "TrayOpenFailed": return .failed
         case "EjectConfirmed": return .ejectCompleted
         case "MediaReturned": return .mediaReturnedDuringCompletion
         case "PreflightFailed": return .failed
@@ -147,6 +163,13 @@ struct BurnProgress: Sendable {
 }
 
 struct BurnRecoveryRequired: LocalizedError {
+    let detail: String
+    var errorDescription: String? { detail }
+}
+
+/// Backend ownership has ended and the original drive disappeared. The write
+/// result and physical eject are still separate; reconnect requires a new scan.
+struct BurnDriveDisconnected: LocalizedError {
     let detail: String
     var errorDescription: String? { detail }
 }

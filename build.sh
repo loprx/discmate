@@ -3,8 +3,8 @@ set -euo pipefail
 
 project_dir=${0:A:h}
 app_dir="$project_dir/build/DiscMate.app"
-discmate_version=${DISCMATE_VERSION:-0.3.9}
-discmate_build=${DISCMATE_BUILD_NUMBER:-2026101901}
+discmate_version=${DISCMATE_VERSION:-0.3.10}
+discmate_build=${DISCMATE_BUILD_NUMBER:-2026102407}
 [[ "$discmate_version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] || { print -u2 'DISCMATE_VERSION must be major.minor.patch'; exit 1; }
 [[ "$discmate_build" =~ '^[1-9][0-9]*$' ]] || { print -u2 'DISCMATE_BUILD_NUMBER must be positive'; exit 1; }
 discmate_signing_identity=${DISCMATE_SIGNING_IDENTITY:--}

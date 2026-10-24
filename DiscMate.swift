@@ -51,6 +51,8 @@ private struct DriveInventoryEntry: @unchecked Sendable {
     let path: String?
     let present: Bool
     let blank: Bool
+    let appendable: Bool
+    let freeBlocks: UInt64?
     let media: DiagnosticMediaType
     let speeds: [Double]
 }
@@ -62,6 +64,9 @@ struct ContentView: View {
     @StateObject private var coordinator = DeviceTaskCoordinator.shared
     @State private var showingDiagnostics = false
     @State private var isRefreshing = false
+    @State private var manualRefreshPending = false
+    @State private var manualRefreshNotice: String?
+    @State private var manualRefreshRequestID: UUID?
     @State private var inventory: [DriveInventoryEntry] = []
     @State private var firstBurnSpeed: BurnSpeedSelection = .automatic
     @State private var fileSizes: [URL: UInt64] = [:]
@@ -78,6 +83,8 @@ struct ContentView: View {
     @State private var selectedDrive = 0
     @State private var discName = "DATA"
     @State private var keepAppendable = true
+    @State private var showAppendHelp = false
+    @State private var firstBurnSummaryReady = false
     @State private var showVerifyHelp = false
     @State private var status = "连接刻录机后点击“刷新设备”。"
 
@@ -101,6 +108,13 @@ struct ContentView: View {
         selectedEntry?.blank == true
     }
     private var appendMode: Bool { job == .data && selectedMediaPresent && !selectedMediaBlank }
+    private var dataSummaryReady: Bool {
+        selectedMediaPresent && (selectedMediaBlank ? firstBurnSummaryReady : sessions.incrementalPlan != nil)
+    }
+    private var dataBurnSpeed: Binding<BurnSpeedSelection> {
+        Binding(get: { appendMode ? sessions.selectedBurnSpeed : firstBurnSpeed },
+                set: { if appendMode { sessions.selectedBurnSpeed = $0 } else { firstBurnSpeed = $0 } })
+    }
     private var selectedBytes: UInt64 { files.reduce(0) { $0 + (fileSizes[$1] ?? 0) } }
     private var selectedSizeText: String {
         let known = OperationEstimate.size(selectedBytes)
@@ -133,10 +147,18 @@ struct ContentView: View {
                             }
                         }
                     }.disabled(locked)
-                    Button(isRefreshing ? "正在识别…" : sessions.needsDeviceRecovery ? "重新检查设备" : "刷新设备") { refresh() }
-                        .disabled(deviceTaskActive)
-                        .help("设备插拔及盘片变化会自动更新；此按钮可手动重新检查，通常数秒，不刻录。系统忙时请等待。")
+                    Button("刷新设备") { requestManualRefresh() }
+                        .help("按钮始终可点。任务占用时只排队一次，待设备操作真正结束后自动刷新；不会并发查询光驱，也不会刻录。")
+                    Button("正常推出") {
+                        if selectedMediaBlank { sessions.ejectBlankDisc(drivePath: selectedEntry?.path) }
+                        else { sessions.ejectNormally(drivePath: selectedEntry?.path, bsd: selectedEntry?.bsd) }
+                    }
+                    .disabled(locked || !selectedMediaPresent || selectedEntry?.path == nil || (!selectedMediaBlank && selectedEntry?.bsd == nil))
+                    .help("正常推出当前光盘；任务占用或无盘时不可点击。不会刻录或强制操作，请确认托盘实际弹出。")
                 }.onChange(of: selectedDrive) { _ in updateSelection() }
+                if let manualRefreshNotice {
+                    Text(manualRefreshNotice).font(.callout).foregroundStyle(.orange)
+                }
                 if sessions.needsDeviceRecovery {
                     if !sessions.recoveryTargets.isEmpty {
                         Picker("恢复目标", selection: $sessions.recoveryTargetPath) {
@@ -164,10 +186,43 @@ struct ContentView: View {
                         .font(.callout).foregroundStyle(.secondary)
                 }
 
+                HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 14) {
                 if job == .data || job == .audio || job == .image || job == .video {
                     DiscMateSection(job == .data ? "1 · 添加要刻录的文件" : "选择刻录内容") {
                         VStack(alignment: .leading, spacing: 10) {
                             if job == .data {
+                                HStack(spacing: 6) {
+                                    Toggle("保留后续追加能力（多会话）", isOn: Binding(
+                                        get: { appendMode ? selectedEntry?.appendable == true : keepAppendable },
+                                        set: { if !appendMode { keepAppendable = $0 } }))
+                                        .disabled(appendMode)
+                                        .help("默认开启。首次刻录后保留追加能力；已有数据盘只显示当前盘片状态。")
+                                    Button { showAppendHelp.toggle() } label: {
+                                        Image(systemName: "info.circle")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityLabel("多会话说明")
+                                    .help("查看保留后续追加能力的作用和限制")
+                                    .popover(isPresented: $showAppendHelp, arrowEdge: .trailing) {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            Text("保留后续追加能力（多会话）").font(.headline)
+                                            Text("首次刻录时保持勾选，系统会尝试保留未用空间，供以后新增文件。盘片、光驱和文件系统仍须支持追加；勾选不保证任何光盘都能追加。")
+                                            Text("已有数据盘的状态由盘片决定，此处只显示结果，不能把已封盘的光盘重新打开。关闭此选项刻录空白盘后，可能无法再加入文件。")
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .font(.callout).padding(14)
+                                        .frame(width: 350, alignment: .leading)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                                if appendMode {
+                                    Text(selectedEntry?.appendable == true
+                                         ? "已有数据盘：本次沿用盘片的多会话状态，并保留旧内容；不能在这里改变旧会话。"
+                                         : "当前盘片未报告可追加；不能通过勾选把已封盘的光盘变成可追加。")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
                                 HStack(spacing: 6) {
                                     Toggle("刻录后由系统校验", isOn: $sessions.verifyAfterWrite)
                                         .help("默认关闭。勾选后，首次刻录或追加完成后由系统校验本次写入，会增加耗时。")
@@ -195,23 +250,8 @@ struct ContentView: View {
                                 }
                             }
                             if job == .data && selectedMediaPresent && selectedMediaBlank {
-                                TextField("光盘名称", text: $discName)
-                                    .help("首次刻录的光盘名称；追加沿用已有目录结构。")
-                                Toggle("保留后续追加能力", isOn: $keepAppendable)
-                                    .help("首次写入后保留追加能力；介质、文件系统与剩余空间也需要支持追加。关闭后可能无法再加入文件。")
-                                if keepAppendable || diagnosticMedia == .dvdPlusR {
-                                    Picker("刻录速率", selection: $firstBurnSpeed) {
-                                        Text(BurnSpeedSelection.automatic.label()).tag(BurnSpeedSelection.automatic)
-                                        ForEach(selectedBurnSpeeds, id: \.self) { speed in
-                                            Text(BurnSpeedSelection.kilobytesPerSecond(speed).label(oneX: speedOneX))
-                                                .tag(BurnSpeedSelection.kilobytesPerSecond(speed))
-                                        }
-                                    }.help("仅列出当前光驱和盘片报告支持的速率。自动请求系统最高可用速度；实际速度可能随写入阶段变化。")
-                                    if selectedBurnSpeeds.isEmpty {
-                                        Text("系统未提供可选速率，当前可使用自动速度。")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    }
-                                }
+                                Text("当前是空白盘；添加文件后查看首次刻录摘要。")
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
                             HStack {
                                 Button(job == .video ? "选择 VIDEO_TS 文件夹…" : "添加文件或文件夹…") { chooseFiles() }
@@ -228,11 +268,12 @@ struct ContentView: View {
                                 Text("已选 \(files.count) 个顶层项目 · \(selectedSizeText)")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
-                            if files.isEmpty {
-                                Text(appendMode ? "选择或拖入新增文件、文件夹，也可按 ⌘V 粘贴。盘上旧内容会保留，不需重新添加。" : "选择或拖入文件、文件夹，也可按 ⌘V 粘贴。添加后查看设置并开始刻录。")
-                                    .foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 70, alignment: .center)
-                            } else {
-                                ScrollView {
+                            ScrollView {
+                                if files.isEmpty {
+                                    Text(appendMode ? "选择或拖入新增文件、文件夹，也可按 ⌘V 粘贴。盘上旧内容会保留，不需重新添加。" : "选择或拖入文件、文件夹，也可按 ⌘V 粘贴。添加后查看刻录摘要。")
+                                        .foregroundStyle(.secondary)
+                                        .frame(maxWidth: .infinity, minHeight: 82, alignment: .center)
+                                } else {
                                     VStack(spacing: 0) {
                                         ForEach(files, id: \.self) { file in
                                             HStack {
@@ -252,16 +293,21 @@ struct ContentView: View {
                                             Divider()
                                         }
                                     }
-                                }.frame(height: min(170, CGFloat(files.count) * 53))
-                            }
+                                }
+                            }.frame(height: 88)
                             if sessions.needsDeviceRecovery {
                                 Text("设备状态尚未确认，请先重新检查设备；待刻录文件仍保留。")
                                     .font(.caption).foregroundStyle(.secondary)
                             } else if job == .data && !selectedMediaPresent {
-                                Text("文件已加入，当前未识别到光盘。放入光盘并合仓，识别完成后自动显示；已有数据盘会显示追加摘要。")
+                                Text(files.isEmpty
+                                     ? "可先添加文件。放入光盘并合仓，识别完成后可查看刻录摘要。"
+                                     : "文件已加入。放入光盘并合仓，识别完成后可查看刻录摘要。")
                                     .font(.caption).foregroundStyle(.secondary)
-                            } else if job != .data || !appendMode {
+                            } else if job != .data {
                                 Text("开始前显示刻录设置或确认。写入、校验和结束期间保持光驱连接；数据 DVD+R 在本窗口显示刻录与收尾进度。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                Text("文件已加入后查看摘要；确认前不会写盘。")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }.padding(4).disabled(locked)
@@ -275,13 +321,108 @@ struct ContentView: View {
                     Text("仅适用于可擦写光盘。擦除会删除盘上全部内容；开始前需确认，耗时取决于盘型和擦除方式，可能数分钟或更久。")
                 } else { Text(cachedDiscDescription).textSelection(.enabled) }
 
-                if job == .info || appendMode {
-                    SessionPane(model: sessions, bsd: selectedEntry?.bsd, otherTaskBusy: isRefreshing || nativeTask.isBusy,
-                                sources: job == .data ? files : [],
-                                drivePath: selectedEntry?.path,
-                                offersAppend: appendMode)
+                if job == .data {
+                    DiscMateSection("2 · 查看刻录摘要") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(!selectedMediaPresent ? "等待光盘：放入光盘并合仓，识别后即可查看摘要。"
+                                 : selectedMediaBlank ? "本次操作：首次刻录。先查看设置和文件摘要，确认后才会写入光盘。"
+                                 : "本次操作：追加刻录。先查看设置和文件摘要，确认后才会写入光盘。")
+                                .font(.callout)
+                            TextField("首次刻录光盘名称", text: $discName)
+                                .disabled(locked || !selectedMediaPresent || !selectedMediaBlank)
+                                .help("只在空白盘首次刻录时可修改；已有数据盘沿用原名称。")
+                            Picker("刻录速率", selection: dataBurnSpeed) {
+                                Text(BurnSpeedSelection.automatic.label()).tag(BurnSpeedSelection.automatic)
+                                ForEach(selectedBurnSpeeds, id: \.self) { speed in
+                                    Text(BurnSpeedSelection.kilobytesPerSecond(speed).label(oneX: speedOneX))
+                                        .tag(BurnSpeedSelection.kilobytesPerSecond(speed))
+                                }
+                            }
+                            .disabled(locked || !selectedMediaPresent)
+                            .help("仅列出当前光驱和盘片报告支持的速率；实际速度可能变化。")
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 6) {
+                            if selectedMediaBlank && firstBurnSummaryReady {
+                                Text("本次写入 \(files.count) 个顶层项目 · \(selectedSizeText)。\(keepAppendable ? "保留后续追加能力。" : "本次写入后封盘。")")
+                                    .font(.callout)
+                                if let blocks = selectedEntry?.freeBlocks {
+                                    Text("盘片报告可用约 \(OperationEstimate.size(blocks * 2048))；目录与结束会话还会占用空间，写前再复核容量。")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                if files.allSatisfy({ fileSizes[$0] != nil }) {
+                                    Text(OperationEstimate.burn(selectedBytes, verifyAfterWrite: sessions.verifyAfterWrite))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                } else {
+                                    Text("含文件夹或待检查项目；文件量与耗时将在写前检查后确定。")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                Text("摘要中的大小是源文件估算；开始前还会复核盘片身份、来源和容量。\(sessions.verifyAfterWrite ? "写入后由系统校验本次数据。" : "未启用系统写后校验。")")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else if appendMode, let plan = sessions.incrementalPlan {
+                                Text("本次新增 \(plan.addedFileCount) 个文件、\(plan.addedDirectoryCount) 个目录；保留旧内容 \(plan.preservedFileCount) 个文件、\(plan.preservedDirectoryCount) 个目录。")
+                                    .font(.callout)
+                                Text("新增数据 \(OperationEstimate.size(plan.addedBytes))；新增镜像 \(OperationEstimate.size(plan.imageBytes))，会话收尾预留 \(OperationEstimate.size(plan.capacityMarginBytes))。旧正文沿用原区段，不重新读取。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                if let writable = sessions.snapshot?.writable {
+                                    let available = UInt64(writable.freeBlocks) * 2048
+                                    let required = plan.imageBytes + plan.capacityMarginBytes
+                                    Text("盘片可用约 \(OperationEstimate.size(available))；扣除镜像和收尾预留后约 \(OperationEstimate.size(available > required ? available - required : 0))。")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                Text(OperationEstimate.burn(plan.imageBytes, verifyAfterWrite: sessions.verifyAfterWrite))
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Text("旧文件正文未在本次重新校验；支持的增量范围为 DVD+R、ISO/Joliet 文件与文件夹。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                Text(selectedMediaPresent ? "先查看摘要；此步骤不写盘。" : "可先添加文件；识别到光盘前不会写入。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                                }.frame(maxWidth: .infinity, alignment: .topLeading)
+                            }.frame(height: 90)
+                            HStack {
+                                Button("查看刻录摘要") {
+                                    if appendMode {
+                                        sessions.prepareIncremental(sources: files, bsd: selectedEntry?.bsd)
+                                    } else if selectedMediaBlank {
+                                        recordFirstBurnSummary(); firstBurnSummaryReady = true
+                                    }
+                                }
+                                .disabled(locked || files.isEmpty || !selectedMediaPresent || selectedEntry?.path == nil ||
+                                          (appendMode && (selectedEntry?.bsd == nil || selectedEntry?.appendable != true || diagnosticMedia != .dvdPlusR)))
+                                .help("检查本次文件与光盘状态并更新摘要；不写盘。")
+                                Button("开始刻录…") {
+                                    if appendMode { sessions.burnIncremental() }
+                                    else { runJob() }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(locked || !dataSummaryReady || selectedEntry?.path == nil ||
+                                          (appendMode && !sessions.incrementalWriteEnabled))
+                                .help("确认后永久占用光盘空间。写入、校验和收尾期间请勿断开光驱或强行退出。")
+                            }
+                            if appendMode {
+                                Text(sessions.message).font(.caption).foregroundStyle(.secondary)
+                                if let failure = sessions.appendPreparationFailure {
+                                    Text("无法准备追加：\(failure)；本次未写盘。")
+                                        .font(.caption).foregroundStyle(.red)
+                                }
+                            }
+                        }.padding(4)
+                    }
                 }
-                if !appendMode {
+                }.frame(maxWidth: .infinity, alignment: .topLeading)
+                if job == .data {
+                    SessionPane(model: sessions, bsd: selectedEntry?.bsd, otherTaskBusy: isRefreshing || nativeTask.isBusy,
+                                drivePath: selectedEntry?.path,
+                                recordedMedia: selectedMediaPresent && !selectedMediaBlank)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                }
+                if job == .info {
+                    SessionPane(model: sessions, bsd: selectedEntry?.bsd, otherTaskBusy: isRefreshing || nativeTask.isBusy,
+                                drivePath: selectedEntry?.path,
+                                recordedMedia: selectedMediaPresent && !selectedMediaBlank)
+                }
+                if job != .data {
                     HStack {
                         Button(job == .erase ? "擦除…" : job == .info ? "刷新信息" : "开始刻录…") { runJob() }
                             .buttonStyle(.borderedProminent)
@@ -308,8 +449,18 @@ struct ContentView: View {
             refresh(source: .startup)
             deviceChanges.setSuspended(locked)
         }
-        .onDisappear { deviceChanges.stop() }
+        .onDisappear {
+            deviceChanges.stop()
+            if let id = manualRefreshRequestID {
+                DiagnosticReportStore.shared.record(taskID: id, event: .cancelled)
+                DiagnosticReportStore.shared.finish(taskID: id, outcome: .cancelled)
+                manualRefreshRequestID = nil
+            }
+            manualRefreshPending = false
+            manualRefreshNotice = nil
+        }
         .onChange(of: locked) { deviceChanges.setSuspended($0) }
+        .onChange(of: coordinator.revision) { _ in drainManualRefresh() }
         .onChange(of: deviceChanges.revision) { _ in
             guard !locked else { return }
             refresh(preserveNativeResult: true, trigger: deviceChanges.lastDelivery, source: .deviceNotification)
@@ -327,9 +478,15 @@ struct ContentView: View {
             // Discard the pre-burn blank/media/BSD caches before any next action.
             let completedDrivePath = selectedEntry?.path
             inventory = []
-            if !sessions.needsDeviceRecovery { refresh(preferredPath: completedDrivePath, preserveNativeResult: true, source: .taskCompleted) }
+            if manualRefreshPending { drainManualRefresh() }
+            else if !sessions.needsDeviceRecovery { refresh(preferredPath: completedDrivePath, preserveNativeResult: true, source: .taskCompleted) }
         }
-        .onChange(of: files) { _ in sessions.invalidatePreparedPlan() }
+        .onChange(of: files) { _ in sessions.invalidatePreparedPlan(); firstBurnSummaryReady = false }
+        .onChange(of: selectionRevision) { _ in firstBurnSummaryReady = false }
+        .onChange(of: keepAppendable) { _ in firstBurnSummaryReady = false }
+        .onChange(of: discName) { _ in firstBurnSummaryReady = false }
+        .onChange(of: firstBurnSpeed) { _ in firstBurnSummaryReady = false }
+        .onChange(of: sessions.verifyAfterWrite) { _ in firstBurnSummaryReady = false }
         .onChange(of: job) { _ in sessions.invalidatePreparedPlan() }
         .task(id: SelectionKey(files: files, revision: selectionRevision)) {
             let selected = files
@@ -377,6 +534,37 @@ struct ContentView: View {
         let registry: DMOpticalRegistryProbe
         let registryCode: Int32
     }
+    private func requestManualRefresh() {
+        if let id = manualRefreshRequestID {
+            DiagnosticReportStore.shared.record(taskID: id, event: .refreshCoalesced)
+        } else {
+            let id = DiagnosticReportStore.shared.startTask(kind: .refreshRequest, driveModel: diagnosticDriveModel)
+            manualRefreshRequestID = id
+            DiagnosticReportStore.shared.record(taskID: id, event: .refreshRequested,
+                evidence: DiagnosticEvidence(refresh: DiagnosticRefreshEvidence(source: .manual,
+                    deferredByTask: isRefreshing || coordinator.isOccupied || sessions.isBusy || nativeTask.isBusy)))
+        }
+        manualRefreshPending = true
+        drainManualRefresh()
+    }
+
+    private func drainManualRefresh() {
+        guard manualRefreshPending else { return }
+        guard !isRefreshing, !sessions.isBusy, !nativeTask.isBusy,
+              (!coordinator.isOccupied || (sessions.needsDeviceRecovery && coordinator.canBeginRecovery)) else {
+            manualRefreshNotice = "已收到刷新请求；当前设备操作尚未结束，结束后自动执行一次。请勿断开正在写入的光驱。"
+            return
+        }
+        manualRefreshPending = false
+        manualRefreshNotice = nil
+        if let id = manualRefreshRequestID {
+            DiagnosticReportStore.shared.record(taskID: id, event: .refreshDispatched)
+            DiagnosticReportStore.shared.finish(taskID: id, outcome: .completed)
+            manualRefreshRequestID = nil
+        }
+        refresh()
+    }
+
     private func refresh(preferredPath: String? = nil, preserveNativeResult: Bool = false,
                          trigger: DeviceChangeObserver.Delivery? = nil,
                          source: DiagnosticRefreshSource = .manual) {
@@ -413,6 +601,8 @@ struct ContentView: View {
                     return DriveInventoryEntry(device: device, description: Self.readDiscDescription(device),
                         name: device.displayName() ?? "刻录机", bsd: info?[DRDeviceMediaBSDNameKey] as? String,
                         path: device.ioRegistryEntryPath(), present: device.mediaIsPresent(), blank: device.mediaIsBlank(),
+                        appendable: device.mediaIsAppendable(),
+                        freeBlocks: device.mediaSpaceFree().map { UInt64($0.sectors()) },
                         media: Self.mediaKind(device.mediaType()), speeds: BurnSpeedOptions.values(fromStatus: status))
                 }
                 var registry = DMOpticalRegistryProbe()
@@ -448,6 +638,7 @@ struct ContentView: View {
             DiagnosticReportStore.shared.finish(taskID: diagnosticID, outcome: .completed)
             status = inventory.isEmpty ? "未检测到刻录机。" : "已检测到 \(inventory.count) 台刻录机。"
             refreshTask = nil
+            drainManualRefresh()
         }
     }
 
@@ -466,6 +657,7 @@ struct ContentView: View {
         sessions.diagnosticMediaType = diagnosticMedia
         sessions.updateBurnSpeeds(selectedBurnSpeeds)
         firstBurnSpeed = .automatic
+        firstBurnSummaryReady = false
         cachedDiscDescription = selectedEntry?.description ?? "未检测到刻录机。"
     }
 
@@ -566,6 +758,15 @@ struct ContentView: View {
         for url in files { removeSelectedFile(url) }
     }
 
+    private func recordFirstBurnSummary() {
+        let store = DiagnosticReportStore.shared
+        let id = store.startTask(kind: .firstBurnSummary, media: diagnosticMedia,
+                                 driveModel: diagnosticDriveModel, fileCount: files.count,
+                                 totalBytes: files.allSatisfy { fileSizes[$0] != nil } ? selectedBytes : nil)
+        store.record(taskID: id, event: .summaryViewed)
+        store.finish(taskID: id, outcome: .completed)
+    }
+
     private func runJob() {
         guard !clipboardImporting, !isRefreshing, !coordinator.isOccupied, !sessions.blocksDeviceOperations, !nativeTask.isBusy, let drive else { return }
         if job == .info {
@@ -597,7 +798,7 @@ struct ContentView: View {
             return
         }
         if job == .data && !drive.mediaIsBlank() {
-            status = "已有数据盘请添加文件后点击“查看追加摘要”。无需完整读取旧内容。"
+            status = "已有数据盘请添加文件后点击“查看刻录摘要”。无需完整读取旧内容。"
             return
         }
         if job == .data && diagnosticMedia == .dvdPlusR {

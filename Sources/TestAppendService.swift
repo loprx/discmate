@@ -81,6 +81,13 @@ struct AppendProof: Codable, Sendable {
     var directories: [String]? = nil
     var allPaths: Set<String> { Set(files.map(\.path) + (preserved ?? []).map(\.path)) }
 
+    /// Cheap UI eligibility check only. Full directory and extent validation
+    /// still runs in the readback task before any file is reported as verified.
+    func targets(_ snapshot: SessionSnapshot) -> Bool {
+        previousSession < UInt32.max && previousSession + 1 == snapshot.latest.session &&
+            expectedStart == snapshot.latest.start
+    }
+
     /// Validate even locally-created manifests at their consumption boundary.
     /// `files` carries content expectations; `preserved` carries only metadata.
     /// A preserved extent is never evidence that its payload was read or hashed.

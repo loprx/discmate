@@ -25,6 +25,9 @@ enum AppendProofTests {
                 rootEntries: root, descriptorHash: "offline", appendable: true)
         }
         try proof.validateStructure()
+        precondition(proof.targets(snapshot(entries)))
+        precondition(!proof.targets(snapshot(entries, session: 1)))
+        precondition(!proof.targets(snapshot(entries, newStart: start + 1)))
         try proof.validateDirectory(snapshot(entries))
         try proof.validate([newActual], session: 5, start: start, addedOnly: true)
         try proof.validate([newActual, oldActual], session: 5, start: start)

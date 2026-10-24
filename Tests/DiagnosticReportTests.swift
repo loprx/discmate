@@ -48,6 +48,28 @@ enum DiagnosticReportTests {
         precondition(decoded.events.contains { $0.evidence?.refresh?.status == 4 &&
             $0.evidence?.refresh?.duplicate == 3 && $0.evidence?.refresh?.deferredByTask == true &&
             $0.evidence?.refresh?.source == .deviceNotification })
+        let requestStore = DiagnosticReportStore(directory: root.appendingPathComponent("refresh-request"))
+        let manualRequest = requestStore.startTask(kind: .refreshRequest)
+        requestStore.record(taskID: manualRequest, event: .refreshRequested,
+                     evidence: DiagnosticEvidence(refresh: DiagnosticRefreshEvidence(source: .manual, deferredByTask: true)))
+        requestStore.record(taskID: manualRequest, event: .refreshCoalesced)
+        requestStore.record(taskID: manualRequest, event: .refreshDispatched)
+        requestStore.finish(taskID: manualRequest, outcome: .completed)
+        let manualReport = try decode(await requestStore.exportData(taskID: manualRequest))
+        precondition(manualReport.task == .refreshRequest && manualReport.outcome == .completed)
+        precondition(manualReport.events.map(\.kind).suffix(3) == [.refreshRequested, .refreshCoalesced, .refreshDispatched])
+        precondition(manualReport.events.contains { $0.evidence?.refresh?.deferredByTask == true })
+        let summaryStore = DiagnosticReportStore(directory: root.appendingPathComponent("first-summary"))
+        let summary = summaryStore.startTask(kind: .firstBurnSummary, media: .dvdPlusR,
+                                             fileCount: 2, totalBytes: 4096)
+        summaryStore.record(taskID: summary, event: .summaryViewed)
+        summaryStore.finish(taskID: summary, outcome: .completed)
+        let summaryData = try await summaryStore.exportData(taskID: summary)
+        let summaryReport = try decode(summaryData)
+        precondition(summaryReport.task == .firstBurnSummary && summaryReport.outcome == .completed)
+        precondition(summaryReport.fileCount == 2 && summaryReport.totalBytes == 4096)
+        precondition(summaryReport.events.map(\.kind) == [.started, .summaryViewed])
+        precondition(!String(decoding: summaryData, as: UTF8.self).contains(secret))
         precondition(DiagnosticErrorCode.extract(error: NSError(domain: "DiscMate.Process", code: 42),
             backendError: nil) == [DiagnosticErrorCode(source: .process, code: 42)])
         precondition(DiagnosticErrorCode.extract(error: NSError(domain: NSOSStatusErrorDomain, code: -119930868),

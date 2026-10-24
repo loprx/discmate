@@ -36,16 +36,26 @@ final class DiscEjectService {
         progress("推出回调成功，正在交叉核对注册表介质移除；尚需确认实际托盘。")
         let deadline = ProcessInfo.processInfo.systemUptime + 30
         var absentSince: TimeInterval?
+        var driveGoneSince: TimeInterval?
         while ProcessInfo.processInfo.systemUptime < deadline {
             var present: Int32 = -1
-            guard dm_registry_identity(drivePath, &current) == 0, current == driveID else {
-                throw BurnRecoveryRequired(detail: "推出期间设备断开，不能认定为正常弹出。")
-            }
+            let identityStatus = dm_registry_identity(drivePath, &current)
             let now = ProcessInfo.processInfo.systemUptime
-            if dm_registry_has_media(drivePath, &present) == 0 && present == 0 {
-                if absentSince == nil { absentSince = now }
-                if now - absentSince! >= 15 { return }
-            } else { absentSince = nil }
+            if identityStatus == ENXIO {
+                if driveGoneSince == nil { driveGoneSince = now }
+                if now - driveGoneSince! >= 3 {
+                    throw BurnDriveDisconnected(detail: "系统推出回调已结束，但光驱随后断开；未确认持续介质移除或实际托盘。重新连接后请刷新设备。")
+                }
+                absentSince = nil
+            } else if identityStatus == 0 && current == driveID {
+                driveGoneSince = nil
+                if dm_registry_has_media(drivePath, &present) == 0 && present == 0 {
+                    if absentSince == nil { absentSince = now }
+                    if now - absentSince! >= 15 { return }
+                } else { absentSince = nil }
+            } else {
+                throw BurnRecoveryRequired(detail: "推出期间光驱身份变化或状态未知，不能认定为正常弹出。")
+            }
             try await Task.sleep(nanoseconds: 500_000_000)
         }
         throw BurnRecoveryRequired(detail: "推出回调结束，但介质移除未持续确认。未重试，也未解除设备故障状态。")

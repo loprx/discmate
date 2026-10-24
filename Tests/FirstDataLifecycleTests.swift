@@ -64,7 +64,7 @@ struct FirstDataLifecycleTests {
         precondition(model.isBusy && model.progress != nil)
         backend.continuation?.resume(); backend.continuation = nil
         await waitUntil { !model.isBusy }
-        precondition(model.message?.contains("介质移除检查完成") == true)
+        precondition(model.message?.contains("推出请求已结束") == true)
         let nextLease = successfulCoordinator.begin()
         precondition(nextLease != nil)
         if let nextLease { successfulCoordinator.finish(nextLease) }

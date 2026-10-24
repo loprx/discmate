@@ -37,7 +37,7 @@ struct AppendSourceTree: Sendable {
             guard validPath(path) else { throw AppendPreflightFailure(.invalidName, "名称或目录深度不在 Joliet 支持范围（最多 8 层）：\(path)") }
             let key = path.precomposedStringWithCanonicalMapping.lowercased()
             if let previous = names[key] {
-                guard previous.0 == path && previous.1 && directory else { throw AppendPreflightFailure(.conflict, "名称冲突：\(path)。请在源文件中改名后重试。") }
+                guard previous.0 == path && previous.1 && directory else { throw AppendPreflightFailure(.conflict, "名称冲突：\(path)。请移除待刻录列表中的同名项；如需保留两份，请给源文件副本改名后重新添加。光盘不能覆盖已有文件。") }
             } else { names[key] = (path, directory) }
             guard names.count <= 10000 else { throw AppendPreflightFailure(.invalidTree, "目录项超过 10000，请减少本次文件。") }
         }

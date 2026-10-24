@@ -17,6 +17,10 @@ final class DeviceTaskCoordinator: ObservableObject {
     var needsRecovery: Bool {
         switch state { case .recoveryRequired, .recovering: return true; default: return false }
     }
+    var canBeginRecovery: Bool {
+        if case .recoveryRequired = state { return true }
+        return false
+    }
     func begin() -> UUID? {
         guard case .idle = state else { return nil }
         let id = UUID(); state = .running(id); return id

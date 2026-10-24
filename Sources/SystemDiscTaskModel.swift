@@ -70,7 +70,7 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
                     (request.verifyAfterWrite ? "已请求系统校验，但未记录到校验阶段" : "未请求系统写后校验")
                 self.message = mediaReturnedDuringCompletion
                     ? "写入结束，但收尾期间介质重新出现；未执行后备推出，也未确认当前盘片。\(verification)。请只读重新识别。"
-                    : "写入及介质移除检查完成；\(verification)。请确认实际托盘已弹出；重新合仓后可读回核验。"
+                    : "写入及系统推出请求已结束；\(verification)。请确认光盘实际弹出；重新合仓后可读回核验。"
             } catch {
                 let needsRecovery = error is BurnRecoveryRequired
                 outcome = needsRecovery ? .needsRecovery : .failed
@@ -101,11 +101,12 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
             case "BackendReleased": event = .backendReleased
             case "RegistryMedia": event = .registryObserved
             case "DeviceStatus", "PreflightValidated", "SameDeviceReturned", "SameDeviceStatusRefreshed": event = .deviceStatusObserved
-            case "DeviceUnavailable", "DeviceIdentityPending": event = .deviceUnavailable
-            case "SystemEject": event = .ejectRequested
+            case "DeviceUnavailable", "DeviceIdentityPending", "DriveDisconnected": event = .deviceUnavailable
+            case "SystemEject", "TrayOpenRequested": event = .ejectRequested
+            case "TrayOpenAccepted": event = .trayOpenAccepted
             case "EjectConfirmed": event = .ejectCompleted
             case "MediaReturned": event = .mediaReturnedDuringCompletion
-            case "PreflightFailed", "EjectFailed": event = .failed
+            case "PreflightFailed", "EjectFailed", "TrayOpenFailed": event = .failed
             default: event = update.kind == .warning ? .waiting : .finishing
             }
         }

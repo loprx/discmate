@@ -24,6 +24,13 @@ enum AppendSourceTreeTests {
         CoreTests.reject("source case-insensitive collision") {
             _ = try AppendSourceTree.inspect([named], existing: [ISOEntry(name: "NAME.TXT", lba: 20, bytes: 1, directory: false)])
         }
+        do {
+            _ = try AppendSourceTree.inspect([named], existing: [ISOEntry(name: "name.txt", lba: 20, bytes: 1, directory: false)])
+            preconditionFailure("Existing filename should block append preparation")
+        } catch let failure as AppendPreflightFailure {
+            precondition(failure.reason == .conflict)
+            precondition(failure.message.contains("name.txt") && failure.message.contains("移除待刻录列表"))
+        }
         let unicode = root.appendingPathComponent("e\u{301}.txt")
         try Data().write(to: unicode)
         CoreTests.reject("source Unicode-normalized collision") {

@@ -4,7 +4,7 @@ import CoreFoundation
 // These enums are the export boundary. Never add user-facing error strings,
 // source paths, volume labels, serials, hashes or raw backend dictionaries here.
 enum DiagnosticTaskKind: String, Codable, CaseIterable {
-    case dataBurn, append, appendPreparation, audioBurn, imageBurn, videoBurn, erase, readback, openLatest, eject, deviceRefresh, clipboardImport
+    case dataBurn, firstBurnSummary, append, appendPreparation, audioBurn, imageBurn, videoBurn, erase, readback, openLatest, eject, deviceRefresh, refreshRequest, clipboardImport
 }
 
 enum DiagnosticMediaType: String, Codable {
@@ -25,10 +25,12 @@ enum DiagnosticEventKind: String, Codable {
     case started, preparing, waiting, writing, verifying, finishing
     case backendDone, backendFailed, backendCancelled
     case deviceUnavailable, deviceAvailable, recoveryRequired
-    case ejectRequested, ejectCompleted, mediaReturnedDuringCompletion, mountRequested, mountCompleted
+    case ejectRequested, trayOpenAccepted, ejectCompleted, mediaReturnedDuringCompletion, mountRequested, mountCompleted
     case panelFinished, panelCreationFailed, backendObservationUnavailable, backendReleased, registryObserved, deviceStatusObserved
     case preflightIdentityRejected, preflightCapabilityRejected, preflightUnavailable
     case appendSourcesChecked, appendSourcesRevalidated, appendPreflightRejected
+    case refreshRequested, refreshCoalesced, refreshDispatched
+    case summaryViewed
     case clipboardPasteShortcut, clipboardFilesSelected, clipboardTextStaged, clipboardImportFailed
     case readbackDirectoryMatched
     case readbackStarted, readbackAddedStarted, readbackFullStarted, readbackAddedSourcesMatched, readbackAllReadableKnownSourcesMatched, readbackAllReadable, readbackFailed, failed, completed, cancelled
