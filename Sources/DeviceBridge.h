@@ -11,6 +11,7 @@ int dm_media(const char *bsd, DMMedia *result);
 int dm_disc(int fd, DMDisc *result);
 int dm_track(int fd, uint32_t number, DMTrack *result);
 int dm_mount_matches(const char *path, const char *bsd);
+int dm_udf_mount_matches(const char *path, const char *bsd);
 int dm_registry_identity(const char *path, uint64_t *identity);
 int dm_registry_has_media(const char *path, int32_t *present);
 int dm_registry_media(const char *path, uint64_t driveID, char *bsd, size_t capacity, DMMedia *result);

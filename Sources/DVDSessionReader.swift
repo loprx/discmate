@@ -96,6 +96,13 @@ final class DVDSessionReader {
             let position = UInt64(latest.start) + UInt64(offset)
             guard position <= UInt32.max else { throw DiscFailure("卷描述符地址溢出。") }
             let data = try read(lba: UInt32(position), bytes: 2048, tracks: [latest])
+            if offset == 16 && data.subdata(in: 1..<6) == Data("BEA01".utf8) {
+                let udf = try UDFVolumeProbe.inspect(sessionStart: latest.start,
+                    capacityBlocks: identity.bytes / 2048) { address in
+                    try self.read(lba: address, bytes: 2048, tracks: [latest])
+                }
+                throw UDFAppendUnsupported(revision: udf.revision, partitionMapType: udf.partitionMapType)
+            }
             let volume = try ISO9660.descriptor(data)
             descriptors.append(data)
             if let volume { if volume.joliet { joliet = volume } else { primary = volume } }

@@ -19,6 +19,14 @@ brew upgrade --cask loprx/tap/discmate
 
 当前下载包采用 ad hoc 签名，没有经过 Apple 公证。通过上面的 Homebrew cask 安装时，cask 会清除安装包上的隔离标记（`com.apple.quarantine`），因此首次打开无需再手动放行；这个步骤只作用于已安装的 DiscMate.app，不修改 Gatekeeper 或其他系统安全设置。若你手动下载 ZIP 后自行解压，首次打开可能提示“Apple 无法验证”，可先确认来源可信，再按 [Apple 的单应用放行步骤](https://support.apple.com/102445) 到「系统设置 → 隐私与安全性 → 仍要打开」操作，或对该副本执行 `xattr -dr com.apple.quarantine /Applications/DiscMate.app`。
 
+## 0.3.12
+
+构建号 `2026111701`。首次刻录与追加刻录统一在主窗口两栏下方显示「当前任务进度」，共用阶段、进度条、速率、耗时和连接提示；有百分比时不再同时显示等待转圈，收尾仍等待设备确认，任务结束后隐藏过期进度。
+
+对于 macOS 已只读挂载的 UDF 光盘，可使用「在访达打开当前 UDF 光盘」打开经目标盘、挂载来源与只读状态核对的目录。此功能不选择其他会话，也不开放 UDF 追加刻录。源码中的受限 UDF 1.02 增量镜像生成器仅供离线实验，未接入正常刻录入口。
+
+本版通过离线回归、诊断报告验证、arm64 构建与签名校验。进度调整未进行新的实盘刻录验收；UDF 只读打开已有本机验证，不能据此宣称 UDF 追加可用。既有 DVD+R ISO/Joliet 支持范围与自动收尾稳定性限制保持不变。
+
 ## 0.3.11
 
 0.3.11 只调整构建、签名和发布链路，应用程序行为与 0.3.10 相同。构建会先清空旧的 `build/DiscMate.app` 再组装，ad hoc 签名固定使用 `local.discmate.app` 和 `local.discmate.app.mount`，发布 ZIP 改用 `ditto -c -k --sequesterRsrc --keepParent`。Homebrew cask 现在会在安装后清除已安装副本的隔离标记，因此首次打开通常不再需要手动放行；该步骤不关闭 Gatekeeper，也不修改其他系统安全设置。手动下载 ZIP 的用户仍按上一节说明自行放行。0.3.10 中关于刻录、追加和读回的实盘结论不变。

@@ -61,32 +61,19 @@ struct SessionPane: View {
 
                 Text(recordedMedia ? model.message : "已有数据盘识别完成后，可在访达打开最新内容或执行读回校验。")
                     .font(.callout).textSelection(.enabled)
-                if model.isBusy {
-                    if let fraction = model.progressFraction { ProgressView(value: fraction) }
-                    if model.phase == .burning, let speed = model.actualBurnSpeedKBps {
-                        Text(String(format: "当前写入速率 %.1f MB/s", speed / 1000)).font(.caption).foregroundStyle(.secondary)
-                    }
-                    else { ProgressView().controlSize(.small) }
-                    HStack {
-                        if let start = model.taskStartedAt {
-                            Text("已用时")
-                            Text(start, style: .timer).monospacedDigit()
-                        }
-                        if let remaining = model.remainingEstimate { Text("· 预计剩余 \(remaining)") }
-                        else { Text("· 剩余时间等待设备进度") }
-                    }.font(.caption).foregroundStyle(.secondary)
-                    Text("请保持光驱连接与供电，等待当前步骤结束。写入及收尾期间请勿强行退出；当前追加不支持安全中途取消。")
-                        .font(.caption).foregroundStyle(.orange)
-                }
 
                 HStack {
-                    Button("在访达打开最新内容") { model.openLatest(bsd: bsd) }
+                    Button(model.unsupportedFilesystem == nil ? "在访达打开最新内容" : "在访达打开当前 UDF 光盘") { model.openLatest(bsd: bsd) }
                         .disabled(locked || !recordedMedia || (model.snapshot == nil && bsd == nil) || model.snapshot?.incompleteSession == true)
                         .help(model.snapshot?.incompleteSession == true
                               ? "末次会话未封闭，不能正常挂载；可使用只读校验读取已记录文件。"
+                              : model.unsupportedFilesystem != nil
+                              ? "只读打开 macOS 当前已挂载的 UDF 光盘；不选择其他会话、不写盘，也不校验文件正文。"
                               : "只读挂载最新会话，可能需要 macOS 管理员授权；通常数秒，系统忙时可能更久。不会逐个读取或校验文件。请等待打开完成后再推出。")
                 }
-                Text(model.snapshot?.incompleteSession == true
+                Text(model.unsupportedFilesystem != nil
+                     ? "UDF 追加尚未开放。这里仅打开系统当前已挂载的光盘内容；不保证多会话盘显示最新会话。"
+                     : model.snapshot?.incompleteSession == true
                      ? "末次会话未封闭：已记录文件可只读检查，但最新会话不能在访达正常挂载，也不能继续追加。"
                      : "macOS 默认可能显示较早内容。使用“在访达打开最新内容”只读打开最新会话；会自动检查目录，不完整读取文件正文。读回和挂载后不会自动弹盘，取盘请点击页面顶部的“正常推出”。")
                     .font(.caption).foregroundStyle(.secondary)
@@ -98,7 +85,7 @@ struct SessionPane: View {
                             .font(.caption).foregroundStyle(.secondary)
                         HStack {
                             Button("只校验本次新增文件") { model.verifyRecorded(addedOnly: true, bsd: bsd) }
-                                .disabled(locked || !recordedMedia || (model.snapshot == nil && bsd == nil) || !model.canVerifyAdded)
+                                .disabled(locked || model.unsupportedFilesystem != nil || !recordedMedia || (model.snapshot == nil && bsd == nil) || !model.canVerifyAdded)
                                 .help("按本次源清单计算新增文件 SHA-256，并检查目录和旧区段；不读取旧正文。若仅追加空目录，只检查目录，不执行文件哈希。")
                             Text(model.canVerifyAdded
                                  ? "\(OperationEstimate.size(model.addedVerificationBytes)) · \(OperationEstimate.read(model.addedVerificationBytes))"
@@ -107,7 +94,7 @@ struct SessionPane: View {
                         }
                         HStack {
                             Button("完整读取所有文件") { model.verifyRecorded(bsd: bsd) }
-                                .disabled(locked || !recordedMedia || (model.snapshot == nil && bsd == nil))
+                                .disabled(locked || model.unsupportedFilesystem != nil || !recordedMedia || (model.snapshot == nil && bsd == nil))
                                 .help("只读遍历最新会话全部文件并计算 SHA-256；仅有源清单的文件可比对源哈希。10 GB 可能需几十分钟至数小时。")
                             if model.snapshot != nil {
                                 Text("\(OperationEstimate.size(model.verificationBytes)) · \(OperationEstimate.read(model.verificationBytes))")
@@ -139,7 +126,7 @@ struct SessionPane: View {
                                 .help("在访达显示已确认的挂载目录，通常立即完成；不重新挂载、不校验。")
                         }
                         Text(model.snapshot.map { "DVD+R · ISO\($0.volume.joliet ? "/Joliet" : "") · 最新会话 \($0.latest.session)" }
-                             ?? "盘型与会话待识别")
+                             ?? (model.unsupportedFilesystem == .udf102 ? "DVD+R · UDF 1.02 · 追加待支持" : "盘型与会话待识别"))
                             .font(.caption).foregroundStyle(.secondary)
                     }.padding(.top, 8)
                 }

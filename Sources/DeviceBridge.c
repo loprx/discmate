@@ -202,10 +202,16 @@ int dm_track(int fd, uint32_t number, DMTrack *out) {
         OSSwapBigToHostInt32(info.nextWritableAddress), OSSwapBigToHostInt32(info.freeBlocks)};
     return 0;
 }
-int dm_mount_matches(const char *path, const char *bsd) {
+static int dm_mount_matches_type(const char *path, const char *bsd, const char *filesystem) {
     struct statfs fs;
     if (statfs(path, &fs)) return errno;
     char expected[64];
     if (snprintf(expected, sizeof(expected), "/dev/%s", bsd) >= (int)sizeof(expected)) return EINVAL;
-    return strcmp(fs.f_mntfromname, expected) || strcmp(fs.f_fstypename, "cd9660") || !(fs.f_flags & MNT_RDONLY) ? EINVAL : 0;
+    return strcmp(fs.f_mntfromname, expected) || strcmp(fs.f_fstypename, filesystem) || !(fs.f_flags & MNT_RDONLY) ? EINVAL : 0;
+}
+int dm_mount_matches(const char *path, const char *bsd) {
+    return dm_mount_matches_type(path, bsd, "cd9660");
+}
+int dm_udf_mount_matches(const char *path, const char *bsd) {
+    return dm_mount_matches_type(path, bsd, "udf");
 }

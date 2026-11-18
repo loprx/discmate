@@ -1,7 +1,7 @@
 import AppKit
 import DiscRecording
 import DiscRecordingUI
-import SwiftUI
+import Combine
 
 /// Owns legacy system-panel operations independently of SwiftUI view lifetime.
 /// The panel notification and backend terminal state must both arrive before reuse.
@@ -420,44 +420,5 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
     private static func hasProgressIndicator(_ view: NSView?) -> Bool {
         guard let view else { return false }
         return view is NSProgressIndicator || view.subviews.contains { hasProgressIndicator($0) }
-    }
-}
-
-struct SystemTaskProgressView: View {
-    let progress: SystemTaskProgress
-    let isBusy: Bool
-    var actualSpeedKBps: Double? = nil
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if isBusy, progress.stage == .writing {
-                Text(actualSpeedKBps.map { String(format: "当前写入速率 %.1f MB/s", $0 / 1000) } ?? "当前写入速率：系统暂未报告")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if isBusy && progress.terminal {
-                HStack {
-                    ProgressView().controlSize(.small)
-                    Text("正在确认设备结束状态与推出结果…")
-                }
-            } else if !progress.terminal {
-                if let fraction = progress.fraction {
-                    ProgressView(value: fraction, total: 1)
-                        .accessibilityLabel(progress.stage.title)
-                } else {
-                    ProgressView().controlSize(.small)
-                        .accessibilityLabel(progress.stage.title)
-                }
-            }
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                if isBusy {
-                    Text("已用时 " + OperationEstimate.duration(max(0, context.date.timeIntervalSince(progress.startedAt))) +
-                         (progress.remaining(at: context.date).map { " · " + $0 } ?? " · 剩余时间等待系统进度"))
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            if isBusy {
-                Text("请保持光驱连接与供电。写入、校验和收尾期间不要强行退出。")
-                    .font(.callout).foregroundStyle(.orange)
-            }
-        }
     }
 }

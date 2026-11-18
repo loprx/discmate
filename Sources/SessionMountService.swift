@@ -63,6 +63,16 @@ final class SessionMountService {
         let description = DADiskCopyDescription(try disk(identity)) as? [String: Any]
         return description?[kDADiskDescriptionVolumePathKey as String] as? URL
     }
+    /// Open only the system's existing UDF mount. This does not claim that a
+    /// multisession UDF disc was mounted at its newest session.
+    func currentUDFMount(_ identity: MediaIdentity) throws -> URL? {
+        let description = DADiskCopyDescription(try disk(identity)) as? [String: Any]
+        guard description?[kDADiskDescriptionVolumeKindKey as String] as? String == "udf",
+              let path = description?[kDADiskDescriptionVolumePathKey as String] as? URL else { return nil }
+        try identity.validate()
+        try checkSystem(dm_udf_mount_matches(path.path, identity.bsd), "确认 UDF 只读挂载来源")
+        return path
+    }
     func unmount(_ snapshot: SessionSnapshot) async throws {
         let disk = try disk(snapshot.identity)
         let description = DADiskCopyDescription(disk) as? [String: Any]

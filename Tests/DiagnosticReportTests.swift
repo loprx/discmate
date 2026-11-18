@@ -70,6 +70,18 @@ enum DiagnosticReportTests {
         precondition(summaryReport.fileCount == 2 && summaryReport.totalBytes == 4096)
         precondition(summaryReport.events.map(\.kind) == [.started, .summaryViewed])
         precondition(!String(decoding: summaryData, as: UTF8.self).contains(secret))
+        let udfStore = DiagnosticReportStore(directory: root.appendingPathComponent("udf"),
+                                             appVersion: "0.3.11", appBuild: "2026110501")
+        let udfTask = udfStore.startTask(kind: .deviceRefresh, media: .dvdPlusR)
+        udfStore.record(taskID: udfTask, event: .filesystemUnsupported,
+                        error: UDFAppendUnsupported(revision: 0x0102, partitionMapType: 1) as NSError,
+                        evidence: DiagnosticEvidence(disc: DiagnosticDiscEvidence(filesystem: .udf102)))
+        udfStore.finish(taskID: udfTask, outcome: .failed)
+        let udfData = try await udfStore.exportData(taskID: udfTask)
+        let udfReport = try decode(udfData)
+        precondition(udfReport.events.contains { $0.kind == .filesystemUnsupported &&
+            $0.evidence?.disc?.filesystem == .udf102 && $0.errorCodes.contains { $0.code == 1001 } })
+        precondition(!String(decoding: udfData, as: UTF8.self).contains(secret))
         precondition(DiagnosticErrorCode.extract(error: NSError(domain: "DiscMate.Process", code: 42),
             backendError: nil) == [DiagnosticErrorCode(source: .process, code: 42)])
         precondition(DiagnosticErrorCode.extract(error: NSError(domain: NSOSStatusErrorDomain, code: -119930868),

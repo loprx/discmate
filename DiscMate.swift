@@ -182,7 +182,7 @@ struct ContentView: View {
                     Text(recoveryNotice).font(.callout).foregroundStyle(.secondary)
                 }
                 if job != .info {
-                    Text(sessions.needsDeviceRecovery ? "设备与盘片状态待确认，请重新检查设备。" : selectedMediaPresent ? (selectedMediaBlank ? "空白光盘 · 可开始首次刻录" : "已有数据光盘 · 新增文件将使用追加流程") : "放入光盘并合仓，识别完成后会自动更新。")
+                    Text(sessions.needsDeviceRecovery ? "设备与盘片状态待确认，请重新检查设备。" : selectedMediaPresent ? (selectedMediaBlank ? "空白光盘 · 可开始首次刻录" : sessions.unsupportedFilesystem != nil ? "已有 UDF 光盘 · 可只读打开，追加刻录待支持" : "已有数据光盘 · 新增文件将使用追加流程") : "放入光盘并合仓，识别完成后会自动更新。")
                         .font(.callout).foregroundStyle(.secondary)
                 }
 
@@ -388,7 +388,7 @@ struct ContentView: View {
                                     }
                                 }
                                 .disabled(locked || files.isEmpty || !selectedMediaPresent || selectedEntry?.path == nil ||
-                                          (appendMode && (selectedEntry?.bsd == nil || selectedEntry?.appendable != true || diagnosticMedia != .dvdPlusR)))
+                                          (appendMode && (selectedEntry?.bsd == nil || selectedEntry?.appendable != true || diagnosticMedia != .dvdPlusR || sessions.unsupportedFilesystem != nil)))
                                 .help("检查本次文件与光盘状态并更新摘要；不写盘。")
                                 Button("开始刻录…") {
                                     if appendMode { sessions.burnIncremental() }
@@ -433,8 +433,22 @@ struct ContentView: View {
                 } else if isRefreshing {
                     Text(status).font(.caption).foregroundStyle(.secondary)
                 }
-                if let progress = nativeTask.progress {
-                    SystemTaskProgressView(progress: progress, isBusy: nativeTask.isBusy, actualSpeedKBps: nativeTask.actualSpeedKBps)
+                // One location for all active tasks, independent of blank/recorded
+                // media state (which may change during automatic eject).
+                if sessions.isBusy {
+                    TaskProgressView(message: sessions.message,
+                                     fraction: sessions.phase == .finishing ? nil : sessions.progressFraction,
+                                     startedAt: sessions.taskStartedAt,
+                                     remaining: sessions.remainingEstimate.map { "预计剩余 " + $0 },
+                                     speedKBps: sessions.phase == .burning ? sessions.actualBurnSpeedKBps : nil)
+                } else if nativeTask.isBusy, let progress = nativeTask.progress {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        TaskProgressView(message: nativeTask.message ?? progress.stage.title,
+                                         fraction: progress.terminal ? nil : progress.fraction,
+                                         startedAt: progress.startedAt,
+                                         remaining: progress.terminal ? nil : progress.remaining(at: context.date),
+                                         speedKBps: progress.stage == .writing ? nativeTask.actualSpeedKBps : nil)
+                    }
                 }
                 if let logError = sessions.logError {
                     Text(logError).font(.caption).foregroundStyle(.orange)

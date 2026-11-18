@@ -29,6 +29,7 @@ enum DiagnosticEventKind: String, Codable {
     case panelFinished, panelCreationFailed, backendObservationUnavailable, backendReleased, registryObserved, deviceStatusObserved
     case preflightIdentityRejected, preflightCapabilityRejected, preflightUnavailable
     case appendSourcesChecked, appendSourcesRevalidated, appendPreflightRejected
+    case filesystemUnsupported
     case refreshRequested, refreshCoalesced, refreshDispatched
     case summaryViewed
     case clipboardPasteShortcut, clipboardFilesSelected, clipboardTextStaged, clipboardImportFailed
@@ -76,7 +77,12 @@ struct DiagnosticDeviceEvidence: Codable, Equatable, Sendable {
     }
 }
 
+enum DiagnosticFilesystem: String, Codable, Sendable {
+    case udf102, udfOther
+}
+
 struct DiagnosticDiscEvidence: Codable, Equatable, Sendable {
+    let filesystem: DiagnosticFilesystem?
     let latestSession: UInt16?
     let latestStartLBA: UInt32?
     let nextWritableLBA: UInt32?
@@ -87,7 +93,9 @@ struct DiagnosticDiscEvidence: Codable, Equatable, Sendable {
 
     init(latestSession: UInt16? = nil, latestStartLBA: UInt32? = nil,
          nextWritableLBA: UInt32? = nil, freeBlocks: UInt32? = nil,
-         rootEntryCount: UInt32? = nil, appendable: Bool? = nil, imageBytes: UInt64? = nil) {
+         rootEntryCount: UInt32? = nil, appendable: Bool? = nil, imageBytes: UInt64? = nil,
+         filesystem: DiagnosticFilesystem? = nil) {
+        self.filesystem = filesystem
         self.latestSession = latestSession; self.latestStartLBA = latestStartLBA
         self.nextWritableLBA = nextWritableLBA; self.freeBlocks = freeBlocks
         self.rootEntryCount = rootEntryCount; self.appendable = appendable; self.imageBytes = imageBytes

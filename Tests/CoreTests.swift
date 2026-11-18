@@ -28,6 +28,7 @@ struct CoreTests {
         OperationEstimateTests.run()
         try AppendProofTests.run()
         try IncrementalISOTests.run(large: CommandLine.arguments.contains("--large-iso"))
+        try UDFVolumeProbeTests.run()
         try await FolderIntegrationTests.run()
         let first = RecordedTrack(number: 1, session: 1, start: 0, blocks: 464, blank: false, damaged: false, nextWritable: nil, freeBlocks: 0)
         let second = RecordedTrack(number: 2, session: 2, start: 2512, blocks: 464, blank: false, damaged: false, nextWritable: nil, freeBlocks: 0)

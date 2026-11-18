@@ -9,6 +9,7 @@ final class SessionModel: ObservableObject {
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var message = "添加要刻录的文件或文件夹，然后点击“查看刻录摘要”。只检查旧目录，不完整读取旧文件。"
     @Published private(set) var appendPreparationFailure: String?
+    @Published private(set) var unsupportedFilesystem: DiagnosticFilesystem?
     @Published private var deviceCache = SessionDeviceCache()
     private(set) var snapshot: SessionSnapshot? {
         get { deviceCache.snapshot }
@@ -154,6 +155,7 @@ final class SessionModel: ObservableObject {
         monitor?.invalidate(); monitor = nil
         discardPreparedPlan()
         deviceCache.invalidateDevice()
+        unsupportedFilesystem = nil
         supportedBurnSpeeds = []; selectedBurnSpeed = .automatic; burnSpeedNotice = nil
     }
 
@@ -222,7 +224,8 @@ final class SessionModel: ObservableObject {
         guard let bsd else { message = "请先选择已放入光盘的刻录机。"; return }
         start {
             self.snapshot = nil; self.mountedURL = nil; self.verified = []
-            self.transition(.inspecting, "正在读取会话和 ISO 目录…")
+            self.unsupportedFilesystem = nil
+            self.transition(.inspecting, "正在识别会话和文件系统目录…")
             let snapshot = try await Task.detached { () throws -> SessionSnapshot in
                 let identity = try MediaIdentity.current(bsd)
                 return try DVDSessionReader(identity: identity).scan()
@@ -253,7 +256,27 @@ final class SessionModel: ObservableObject {
     }
     func openLatest(bsd: String? = nil) {
         start(kind: .openLatest) {
-            let expected = try await self.snapshotForReading(bsd: bsd)
+            let expected: SessionSnapshot
+            do { expected = try await self.snapshotForReading(bsd: bsd) }
+            catch let unsupported as UDFAppendUnsupported {
+                guard let bsd else { throw DiscFailure("请重新选择光驱后打开 UDF 光盘。") }
+                self.diagnostic(.filesystemUnsupported, error: unsupported as NSError,
+                    evidence: DiagnosticEvidence(disc: DiagnosticDiscEvidence(
+                        filesystem: unsupported.revision == 0x0102 ? .udf102 : .udfOther)))
+                let identity = try await Task.detached { try MediaIdentity.current(bsd) }.value
+                let service = try SessionMountService()
+                guard let path = try service.currentUDFMount(identity) else {
+                    throw DiscFailure("系统尚未挂载这张 UDF 光盘；请先在访达确认光盘可见，再重新检查设备。没有执行强制挂载。")
+                }
+                try identity.validate()
+                self.unsupportedFilesystem = unsupported.revision == 0x0102 ? .udf102 : .udfOther
+                self.diagnostic(.mountCompleted, evidence: DiagnosticEvidence(disc:
+                    DiagnosticDiscEvidence(filesystem: self.unsupportedFilesystem)))
+                self.transition(.ready, "已在访达打开系统当前挂载的 UDF 光盘；只读访问，未选择或验证其他会话，也未写盘。UDF 追加仍待实现。")
+                self.log("UDF_SYSTEM_MOUNT_OPENED; readOnly=true; sessionSelection=system; filesVerified=false")
+                NSWorkspace.shared.open(path)
+                return
+            }
             guard !expected.incompleteSession else {
                 throw DiscFailure("末次会话未封闭，无法作为正常光盘挂载；可使用“直接读回校验”检查已记录文件。")
             }
@@ -559,6 +582,14 @@ final class SessionModel: ObservableObject {
                 self.diagnostic(.recoveryRequired, error: error as NSError)
                 self.invalidateDeviceCache()
                 self.transition(.recoveryRequired, error.localizedDescription)
+            }
+            catch let error as UDFAppendUnsupported {
+                outcome = .failed
+                self.unsupportedFilesystem = error.revision == 0x0102 ? .udf102 : .udfOther
+                self.diagnostic(.filesystemUnsupported, error: error as NSError,
+                    evidence: DiagnosticEvidence(disc: DiagnosticDiscEvidence(
+                        filesystem: self.unsupportedFilesystem)))
+                self.transition(.failed, error.localizedDescription)
             }
             catch {
                 outcome = .failed

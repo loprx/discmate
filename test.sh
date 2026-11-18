@@ -10,6 +10,7 @@ CLANG_MODULE_CACHE_PATH=/tmp/discmate-clang-cache SDKROOT="$sdk_path" \
 xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   -import-objc-header "$project_dir/Sources/DeviceBridge.h" \
   "$project_dir/Sources/ISO9660.swift" "$project_dir/Sources/DVDSessionReader.swift" \
+  "$project_dir/Sources/UDFVolumeProbe.swift" "$project_dir/Sources/UDFDirectoryReader.swift" "$project_dir/Sources/UDFIncremental.swift" "$project_dir/Tests/UDFVolumeProbeTests.swift" \
   "$project_dir/Sources/RecordedDirectoryTree.swift" "$project_dir/Tests/RecordedDirectoryTreeTests.swift" \
   "$project_dir/Sources/MountedSessionDirectory.swift" "$project_dir/Tests/MountedSessionDirectoryTests.swift" \
   "$project_dir/Sources/TestAppendService.swift" "$project_dir/Tests/CoreTests.swift" \
