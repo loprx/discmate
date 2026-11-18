@@ -12,7 +12,12 @@ struct SessionPane: View {
     private var locked: Bool { model.blocksDeviceOperations || otherTaskBusy }
 
     var body: some View {
-        DiscMateSection("光盘内容与操作") {
+        DiscMateSection("光盘内容与操作",
+                        tip: """
+                        macOS 可能默认显示较早的会话。点“在访达打开最新内容”可只读打开最新会话。浏览或校验后，点窗口顶部的“正常推出”取盘。
+
+                        日常追加无需完整读取旧文件。读回校验前请合仓并刷新设备，校验期间保持光驱连接。没有源哈希的文件只能确认可读，无法比对原文件。
+                        """) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     if let snapshot = model.snapshot {
@@ -59,8 +64,10 @@ struct SessionPane: View {
                 .frame(height: 88)
                 .accessibilityLabel("盘上已有文件列表")
 
-                Text(recordedMedia ? model.message : "已有数据盘识别完成后，可在访达打开最新内容或执行读回校验。")
-                    .font(.callout).textSelection(.enabled)
+                if !model.isBusy {
+                    Text(recordedMedia ? model.message : "已有数据盘识别完成后，可在访达打开最新内容或执行读回校验。")
+                        .font(.callout).textSelection(.enabled)
+                }
 
                 HStack {
                     Button(model.unsupportedFilesystem == nil ? "在访达打开最新内容" : "在访达打开当前 UDF 光盘") { model.openLatest(bsd: bsd) }
@@ -71,18 +78,14 @@ struct SessionPane: View {
                               ? "只读打开 macOS 当前已挂载的 UDF 光盘；不选择其他会话、不写盘，也不校验文件正文。"
                               : "只读挂载最新会话，可能需要 macOS 管理员授权；通常数秒，系统忙时可能更久。不会逐个读取或校验文件。请等待打开完成后再推出。")
                 }
-                Text(model.unsupportedFilesystem != nil
-                     ? "UDF 追加尚未开放。这里仅打开系统当前已挂载的光盘内容；不保证多会话盘显示最新会话。"
-                     : model.snapshot?.incompleteSession == true
-                     ? "末次会话未封闭：已记录文件可只读检查，但最新会话不能在访达正常挂载，也不能继续追加。"
-                     : "macOS 默认可能显示较早内容。使用“在访达打开最新内容”只读打开最新会话；会自动检查目录，不完整读取文件正文。读回和挂载后不会自动弹盘，取盘请点击页面顶部的“正常推出”。")
-                    .font(.caption).foregroundStyle(.secondary)
+                if model.unsupportedFilesystem != nil {
+                    Text("UDF 仅支持打开系统已挂载的内容。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("可选：读回校验").font(.headline)
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("日常追加无需完整读取旧内容。独立读回需先合仓并刷新设备；校验期间保持光驱连接。")
-                            .font(.caption).foregroundStyle(.secondary)
                         HStack {
                             Button("只校验本次新增文件") { model.verifyRecorded(addedOnly: true, bsd: bsd) }
                                 .disabled(locked || model.unsupportedFilesystem != nil || !recordedMedia || (model.snapshot == nil && bsd == nil) || !model.canVerifyAdded)
@@ -107,8 +110,6 @@ struct SessionPane: View {
                         Button("载入历史校验清单…") { model.loadExpectedProof() }
                             .disabled(locked)
                             .help("打开本机 JSON 源清单供后续只读比对；通常立即完成，不访问或写入光盘。")
-                        Text("无源哈希的旧文件只能检查可读性并生成本次哈希，不能称为与原文件一致。")
-                            .font(.caption).foregroundStyle(.secondary)
                     }.padding(.top, 8)
                 }
                 VStack(alignment: .leading, spacing: 8) {
