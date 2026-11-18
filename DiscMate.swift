@@ -148,7 +148,8 @@ struct ContentView: View {
                         }
                     }.disabled(locked)
                     Button("刷新设备") { requestManualRefresh() }
-                        .help("按钮始终可点。任务占用时只排队一次，待设备操作真正结束后自动刷新；不会并发查询光驱，也不会刻录。")
+                        .keyboardShortcut("r", modifiers: .command)
+                        .help("刷新设备（⌘R）。按钮始终可点。任务占用时只排队一次，待设备操作真正结束后自动刷新；不会并发查询光驱，也不会刻录。")
                     Button("正常推出") {
                         if selectedMediaBlank { sessions.ejectBlankDisc(drivePath: selectedEntry?.path) }
                         else { sessions.ejectNormally(drivePath: selectedEntry?.path, bsd: selectedEntry?.bsd) }
