@@ -9,6 +9,7 @@ xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   -module-cache-path /tmp/discmate-swift-cache \
   "$project_dir/Sources/DiagnosticReport.swift" "$project_dir/Sources/DiagnosticPreview.swift" \
   "$project_dir/Sources/DiagnosticsView.swift" "$project_dir/Tests/DiagnosticPreviewFixture.swift" \
+  "$project_dir/Sources/FloatingScrollView.swift" \
   "$project_dir/Tests/DiagnosticsPreviewApp.swift" -framework SwiftUI -framework AppKit \
   -o "$app_dir/Contents/MacOS/DiagnosticsPreview"
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'

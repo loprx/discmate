@@ -50,7 +50,7 @@ struct DiagnosticsView: View {
                     Button("下一页") { pageIndex += 1 }.disabled(pageIndex + 1 >= preview.pages.count)
                     Spacer()
                 }
-                ScrollView([.vertical, .horizontal]) {
+                FloatingScrollView([.vertical, .horizontal]) {
                     Text(preview.pages[pageIndex]).font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(10)
                 }.id(pageIndex).background(Color.secondary.opacity(0.08)).cornerRadius(8)
@@ -153,6 +153,8 @@ struct DiagnosticsView: View {
         case .deviceRefresh: return "刷新设备"
         case .refreshRequest: return "手动刷新请求"
         case .clipboardImport: return "从剪贴板添加"
+        case .softwareUpdate: return "检查软件更新"
+        case .sourceSelection: return "选择刻录文件"
         }
     }
 

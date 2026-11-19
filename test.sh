@@ -24,6 +24,7 @@ xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   "$project_dir/Sources/BurnSpeed.swift" "$project_dir/Tests/BurnSpeedTests.swift" \
   "$project_dir/Sources/DeviceChangeObserver.swift" "$project_dir/Tests/DeviceChangeObserverTests.swift" \
   "$project_dir/Sources/DiagnosticReport.swift" "$project_dir/Tests/DiagnosticReportTests.swift" \
+  "$project_dir/Sources/SoftwareUpdate.swift" "$project_dir/Tests/SoftwareUpdateTests.swift" \
   "$project_dir/Sources/DiagnosticPreview.swift" "$project_dir/Tests/DiagnosticPreviewTests.swift" \
   "$project_dir/Tests/DiagnosticPreviewFixture.swift" \
   "$project_dir/Sources/LegacyMediaPreflight.swift" \

@@ -4,7 +4,7 @@ import CoreFoundation
 // These enums are the export boundary. Never add user-facing error strings,
 // source paths, volume labels, serials, hashes or raw backend dictionaries here.
 enum DiagnosticTaskKind: String, Codable, CaseIterable {
-    case dataBurn, firstBurnSummary, append, appendPreparation, audioBurn, imageBurn, videoBurn, erase, readback, openLatest, eject, deviceRefresh, refreshRequest, clipboardImport
+    case dataBurn, firstBurnSummary, append, appendPreparation, audioBurn, imageBurn, videoBurn, erase, readback, openLatest, eject, deviceRefresh, refreshRequest, clipboardImport, softwareUpdate, sourceSelection
 }
 
 enum DiagnosticMediaType: String, Codable {
@@ -33,6 +33,8 @@ enum DiagnosticEventKind: String, Codable {
     case refreshRequested, refreshCoalesced, refreshDispatched
     case summaryViewed
     case clipboardPasteShortcut, clipboardFilesSelected, clipboardTextStaged, clipboardImportFailed
+    case updateAvailable, updateCurrent, updateCheckFailed
+    case sourcePickerOpened, sourcePickerConfirmed, sourcePickerBlocked
     case readbackDirectoryMatched
     case readbackStarted, readbackAddedStarted, readbackFullStarted, readbackAddedSourcesMatched, readbackAllReadableKnownSourcesMatched, readbackAllReadable, readbackFailed, failed, completed, cancelled
 }
@@ -262,7 +264,7 @@ struct DiagnosticEvidence: Codable, Equatable, Sendable {
 }
 
 struct DiagnosticErrorCode: Codable, Equatable {
-    enum Source: String, Codable, Sendable { case cocoa, posix, osStatus, discRecording, process, other }
+    enum Source: String, Codable, Sendable { case cocoa, posix, osStatus, discRecording, process, url, updateHTTP, updateVersion, other }
     let source: Source
     let code: Int64
 
@@ -274,6 +276,9 @@ struct DiagnosticErrorCode: Codable, Equatable {
             case NSCocoaErrorDomain: source = .cocoa
             case NSPOSIXErrorDomain: source = .posix
             case NSOSStatusErrorDomain: source = .osStatus
+            case NSURLErrorDomain: source = .url
+            case "DiscMate.UpdateHTTP": source = .updateHTTP
+            case "DiscMate.UpdateVersion": source = .updateVersion
             case "DiscMate.Process": source = .process
             default: source = .other
             }

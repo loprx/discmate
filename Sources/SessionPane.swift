@@ -35,7 +35,7 @@ struct SessionPane: View {
                         Text("剩余空间待识别").foregroundStyle(.secondary)
                     }
                 }.font(.callout)
-                ScrollView {
+                FloatingScrollView {
                     if let snapshot = model.snapshot {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(Array(snapshot.rootEntries.enumerated()), id: \.offset) { item in

@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum DiscMateShortcutAction: String, CaseIterable, Identifiable {
-    case refresh, summary, burn
+    case refresh, summary, burn, eject
 
     var id: Self { self }
 
@@ -10,6 +10,7 @@ enum DiscMateShortcutAction: String, CaseIterable, Identifiable {
         case .refresh: "刷新设备"
         case .summary: "查看刻录摘要"
         case .burn: "开始刻录"
+        case .eject: "正常推出"
         }
     }
 
@@ -18,6 +19,7 @@ enum DiscMateShortcutAction: String, CaseIterable, Identifiable {
         case .refresh: "command-r"
         case .summary: "shift-r"
         case .burn: "shift-return"
+        case .eject: "command-e"
         }
     }
 }
@@ -29,7 +31,8 @@ struct DiscMateShortcutChoice: Identifiable {
 
     static let all: [Self] = [
         .init(id: "off", label: "关闭", shortcut: nil),
-        .init(id: "command-r", label: "⌘R", shortcut: KeyboardShortcut("r", modifiers: .command))
+        .init(id: "command-r", label: "⌘R", shortcut: KeyboardShortcut("r", modifiers: .command)),
+        .init(id: "command-e", label: "⌘E", shortcut: KeyboardShortcut("e", modifiers: .command))
     ] + choices(prefix: "shift", symbol: "⌘⇧", modifiers: [.command, .shift],
                 keys: "rb1234567890") +
         choices(prefix: "option-shift", symbol: "⌘⌥⇧", modifiers: [.command, .option, .shift],
@@ -114,8 +117,20 @@ struct ShortcutSettingsView: View {
                 }
                 Button("恢复默认快捷键") { shortcuts.reset() }
             }
+            Section("固定快捷键") {
+                LabeledContent("添加文件或文件夹", value: "⌘O")
+                    .floatingScrollbars()
+                LabeledContent("从剪贴板添加（数据光盘）", value: "⌘V")
+                LabeledContent("打开设置", value: "⌘,")
+                LabeledContent("关闭设置", value: "Esc / ⌘W")
+                LabeledContent("打开使用帮助", value: "⌘?")
+            }
+            Section("页面切换") {
+                ForEach(Job.allCases) { job in
+                    LabeledContent(job.rawValue, value: "⌘\(job.shortcutKey)")
+                }
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 410)
     }
 }

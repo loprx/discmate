@@ -10,6 +10,10 @@ DiscMate 是面向 Apple Silicon Mac 的免费光盘刻录工具。核心功能�
 brew install --cask loprx/tap/discmate
 ```
 
+在「DiscMate → 设置 → 软件更新」可查看版本和构建号，手动检查 GitHub 正式发布版本，并打开新版发布页。检查结果与错误码可在脱敏诊断报告中查看。
+可按 ⌘O 打开刻录页面的文件选择器，按 Esc 或 ⌘W 关闭设置窗口。
+
+
 更新已安装版本：
 
 ```sh

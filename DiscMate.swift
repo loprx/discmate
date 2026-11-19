@@ -15,6 +15,7 @@ struct DiscMateApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) { }
+            DiscMateTaskCommands()
             DiscMateHelpCommands()
         }
         Window("DiscMate 使用帮助", id: "discmate-help") {
@@ -22,7 +23,7 @@ struct DiscMateApp: App {
                 .frame(minWidth: 560, minHeight: 440)
         }
         Settings {
-            ShortcutSettingsView(shortcuts: shortcuts)
+            DiscMateSettingsView(shortcuts: shortcuts)
         }
     }
 }
@@ -35,15 +36,34 @@ private final class DiscMateApplicationDelegate: NSObject, NSApplicationDelegate
     }
 }
 
-private enum Job: String, CaseIterable, Identifiable {
-    case data = "数据光盘"
-    case audio = "音频 CD"
-    case image = "刻录镜像"
-    case video = "VIDEO_TS"
-    case erase = "擦除光盘"
-    case info = "光盘信息"
+private struct TaskSelection {
+    let job: Binding<Job>
+    let enabled: Bool
+}
 
-    var id: String { rawValue }
+private struct TaskSelectionKey: FocusedValueKey {
+    typealias Value = TaskSelection
+}
+
+private extension FocusedValues {
+    var discMateTaskSelection: TaskSelection? {
+        get { self[TaskSelectionKey.self] }
+        set { self[TaskSelectionKey.self] = newValue }
+    }
+}
+
+private struct DiscMateTaskCommands: Commands {
+    @FocusedValue(\.discMateTaskSelection) private var selection
+
+    var body: some Commands {
+        CommandMenu("任务") {
+            ForEach(Job.allCases) { job in
+                Button(job.rawValue) { selection?.job.wrappedValue = job }
+                    .keyboardShortcut(KeyEquivalent(job.shortcutKey), modifiers: .command)
+                    .disabled(selection?.enabled != true)
+            }
+        }
+    }
 }
 
 /// One refresh result per drive; never combine fields from different indexes.
@@ -127,7 +147,7 @@ struct ContentView: View {
     }
 
     var body: some View {
-        ScrollView {
+        FloatingScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .center, spacing: 12) {
                     Image(nsImage: NSApp.applicationIconImage)
@@ -159,8 +179,9 @@ struct ContentView: View {
                         if selectedMediaBlank { sessions.ejectBlankDisc(drivePath: selectedEntry?.path) }
                         else { sessions.ejectNormally(drivePath: selectedEntry?.path, bsd: selectedEntry?.bsd) }
                     }
+                    .keyboardShortcut(shortcuts.choice(for: .eject).shortcut)
                     .disabled(locked || !selectedMediaPresent || selectedEntry?.path == nil || (!selectedMediaBlank && selectedEntry?.bsd == nil))
-                    .help("正常推出当前光盘；任务占用或无盘时不可点击。不会刻录或强制操作，请确认托盘实际弹出。")
+                    .help("\(shortcuts.helpTitle(for: .eject))当前光盘。任务占用或无盘时不可用。不会刻录或强制操作，请确认托盘实际弹出。")
                 }.onChange(of: selectedDrive) { _ in updateSelection() }
                 if let manualRefreshNotice {
                     Text(manualRefreshNotice).font(.callout).foregroundStyle(.orange)
@@ -253,7 +274,9 @@ struct ContentView: View {
                             }
                             HStack {
                                 Button(job == .video ? "选择 VIDEO_TS 文件夹…" : "添加文件或文件夹…") { chooseFiles() }
-                                    .help("选择本机文件加入待刻录列表；不会写入光盘。开始前会检查容量和文件是否可读。")
+                                    .keyboardShortcut("o", modifiers: .command)
+                                    .disabled(locked || clipboardImporting)
+                                    .help("按 ⌘O 选择本机文件加入待刻录列表。开始前会检查容量和文件是否可读。")
                                 if job == .data {
                                     Button(clipboardImporting ? "正在添加…" : "从剪贴板添加") { pasteClipboardIntoDataList() }
                                         .disabled(locked || clipboardImporting)
@@ -266,7 +289,7 @@ struct ContentView: View {
                                 Text("已选 \(files.count) 个顶层项目 · \(selectedSizeText)")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
-                            ScrollView {
+                            FloatingScrollView {
                                 if files.isEmpty {
                                     Text(job == .data ? "拖入文件或文件夹，也可按 ⌘V 粘贴" : "尚未选择刻录内容")
                                         .foregroundStyle(.secondary)
@@ -326,7 +349,7 @@ struct ContentView: View {
                             }
                             .disabled(locked || !selectedMediaPresent)
                             .help("仅列出当前光驱和盘片报告支持的速率；实际速度可能变化。")
-                            ScrollView {
+                            FloatingScrollView {
                                 VStack(alignment: .leading, spacing: 6) {
                             if selectedMediaBlank && firstBurnSummaryReady {
                                 Text("本次写入 \(files.count) 个顶层项目 · \(selectedSizeText)。\(keepAppendable ? "保留后续追加能力。" : "本次写入后封盘。")")
@@ -485,6 +508,7 @@ struct ContentView: View {
         .onChange(of: firstBurnSpeed) { _ in firstBurnSummaryReady = false }
         .onChange(of: sessions.verifyAfterWrite) { _ in firstBurnSummaryReady = false }
         .onChange(of: job) { _ in sessions.invalidatePreparedPlan() }
+        .focusedSceneValue(\.discMateTaskSelection, TaskSelection(job: $job, enabled: !locked))
         .task(id: SelectionKey(files: files, revision: selectionRevision)) {
             let selected = files
             let metadata = await Task.detached { () -> ([URL: UInt64], Set<URL>) in
@@ -659,13 +683,27 @@ struct ContentView: View {
     }
 
     private func chooseFiles() {
+        guard !locked, !clipboardImporting, NSApp.modalWindow == nil else { return }
+        let reports = DiagnosticReportStore.shared
+        let taskID = reports.startTask(kind: .sourceSelection)
+        reports.record(taskID: taskID, event: .sourcePickerOpened)
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = job != .image && job != .video
         panel.canChooseDirectories = job == .data || job == .video
         panel.canChooseFiles = job != .video
-        if panel.runModal() == .OK {
-            addSelectedURLs(panel.urls)
+        guard panel.runModal() == .OK else {
+            reports.record(taskID: taskID, event: .cancelled)
+            reports.finish(taskID: taskID, outcome: .cancelled)
+            return
         }
+        guard !locked, !clipboardImporting else {
+            reports.record(taskID: taskID, event: .sourcePickerBlocked)
+            reports.finish(taskID: taskID, outcome: .cancelled)
+            return
+        }
+        addSelectedURLs(panel.urls)
+        reports.record(taskID: taskID, event: .sourcePickerConfirmed)
+        reports.finish(taskID: taskID, outcome: .completed)
     }
 
     private func addSelectedURLs(_ urls: [URL]) {

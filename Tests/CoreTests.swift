@@ -10,6 +10,7 @@ struct CoreTests {
         try BurnSpeedTests.run()
         DeviceChangeObserverTests.run()
         try await DiagnosticReportTests.run()
+        try await SoftwareUpdateTests.run()
         try await DiagnosticPreviewTests.run()
         try RecordedDirectoryTreeTests.run()
         try AppendSourceTreeTests.run()

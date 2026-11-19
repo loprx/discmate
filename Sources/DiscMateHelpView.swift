@@ -13,7 +13,7 @@ struct DiscMateHelpCommands: Commands {
 
 struct DiscMateHelpView: View {
     var body: some View {
-        ScrollView {
+        FloatingScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Text("DiscMate 使用帮助").font(.largeTitle.bold())
                 Text("当前已实盘验证的追加范围：DVD+R、ISO 9660/Joliet、普通文件及含中文和空目录的文件夹。其他盘型仍待验证；文件夹目前仅有一张盘的一次实测。")
