@@ -174,14 +174,14 @@ struct ContentView: View {
                     }.disabled(locked)
                     Button("刷新设备") { requestManualRefresh() }
                         .keyboardShortcut(shortcuts.choice(for: .refresh).shortcut)
-                        .help("\(shortcuts.helpTitle(for: .refresh))。任务占用时只排队一次，待设备操作结束后自动刷新。")
-                    Button("正常推出") {
+                        .help("\(shortcuts.titleWithShortcut(for: .refresh))。任务占用时只排队一次，待设备操作结束后自动刷新。")
+                    Button(shortcuts.titleWithShortcut(for: .eject)) {
                         if selectedMediaBlank { sessions.ejectBlankDisc(drivePath: selectedEntry?.path) }
                         else { sessions.ejectNormally(drivePath: selectedEntry?.path, bsd: selectedEntry?.bsd) }
                     }
                     .keyboardShortcut(shortcuts.choice(for: .eject).shortcut)
                     .disabled(locked || !selectedMediaPresent || selectedEntry?.path == nil || (!selectedMediaBlank && selectedEntry?.bsd == nil))
-                    .help("\(shortcuts.helpTitle(for: .eject))当前光盘。任务占用或无盘时不可用。不会刻录或强制操作，请确认托盘实际弹出。")
+                    .help("正常推出当前光盘，无盘或设备忙时不可用。此操作不写盘，通常需要数秒至半分钟。请等托盘弹出后再取盘。")
                 }.onChange(of: selectedDrive) { _ in updateSelection() }
                 if let manualRefreshNotice {
                     Text(manualRefreshNotice).font(.callout).foregroundStyle(.orange)
@@ -395,7 +395,7 @@ struct ContentView: View {
                                 .disabled(locked || files.isEmpty || !selectedMediaPresent || selectedEntry?.path == nil ||
                                           (appendMode && (selectedEntry?.bsd == nil || selectedEntry?.appendable != true || diagnosticMedia != .dvdPlusR || sessions.unsupportedFilesystem != nil)))
                                 .keyboardShortcut(shortcuts.choice(for: .summary).shortcut)
-                                .help("\(shortcuts.helpTitle(for: .summary))。检查本次文件和光盘状态，不写盘。")
+                                .help("\(shortcuts.titleWithShortcut(for: .summary))。检查本次文件和光盘状态，不写盘。")
                                 Button("开始刻录…") {
                                     if appendMode { sessions.burnIncremental() }
                                     else { runJob() }
@@ -404,7 +404,7 @@ struct ContentView: View {
                                 .disabled(locked || !dataSummaryReady || selectedEntry?.path == nil ||
                                           (appendMode && !sessions.incrementalWriteEnabled))
                                 .keyboardShortcut(shortcuts.choice(for: .burn).shortcut)
-                                .help("\(shortcuts.helpTitle(for: .burn))。确认后永久占用光盘空间。写入、校验和收尾期间请勿断开光驱或强行退出。")
+                                .help("\(shortcuts.titleWithShortcut(for: .burn))。确认后永久占用光盘空间。写入、校验和收尾期间请勿断开光驱或强行退出。")
                             }
                             if appendMode, let failure = sessions.appendPreparationFailure {
                                 Text("无法准备追加：\(failure)；本次未写盘。")

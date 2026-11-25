@@ -92,7 +92,7 @@ final class DiscMateShortcuts: ObservableObject {
         choices = [:]
     }
 
-    func helpTitle(for action: DiscMateShortcutAction) -> String {
+    func titleWithShortcut(for action: DiscMateShortcutAction) -> String {
         let selected = choice(for: action)
         return selected.shortcut == nil ? action.title : "\(action.title)（\(selected.label)）"
     }

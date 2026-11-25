@@ -23,6 +23,10 @@ brew upgrade --cask loprx/tap/discmate
 
 当前下载包采用 ad hoc 签名，没有经过 Apple 公证。通过上面的 Homebrew cask 安装时，cask 会清除安装包上的隔离标记（`com.apple.quarantine`），因此首次打开无需再手动放行；这个步骤只作用于已安装的 DiscMate.app，不修改 Gatekeeper 或其他系统安全设置。若你手动下载 ZIP 后自行解压，首次打开可能提示“Apple 无法验证”，可先确认来源可信，再按 [Apple 的单应用放行步骤](https://support.apple.com/102445) 到「系统设置 → 隐私与安全性 → 仍要打开」操作，或对该副本执行 `xattr -dr com.apple.quarantine /Applications/DiscMate.app`。
 
+## 0.4.1
+
+构建号 `2026112502`。主窗口的「正常推出」按钮会显示当前快捷键，默认是 ⌘E。在「设置 → 快捷键 → 正常推出」中可以更改或关闭快捷键。关闭后仍可点击按钮取盘。
+
 ## 0.3.14
 
 构建号 `2026111803`。顶部菜单「DiscMate → 设置…」（⌘,）可配置三项快捷键，也可关闭或恢复默认。默认 ⌘R 刷新设备、⌘⇧R 查看刻录摘要、⌘⇧↩ 开始刻录，写盘前仍需确认。
