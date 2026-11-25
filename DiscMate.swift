@@ -175,13 +175,13 @@ struct ContentView: View {
                     Button("刷新设备") { requestManualRefresh() }
                         .keyboardShortcut(shortcuts.choice(for: .refresh).shortcut)
                         .help("\(shortcuts.titleWithShortcut(for: .refresh))。任务占用时只排队一次，待设备操作结束后自动刷新。")
-                    Button(shortcuts.titleWithShortcut(for: .eject)) {
+                    Button("正常推出") {
                         if selectedMediaBlank { sessions.ejectBlankDisc(drivePath: selectedEntry?.path) }
                         else { sessions.ejectNormally(drivePath: selectedEntry?.path, bsd: selectedEntry?.bsd) }
                     }
                     .keyboardShortcut(shortcuts.choice(for: .eject).shortcut)
                     .disabled(locked || !selectedMediaPresent || selectedEntry?.path == nil || (!selectedMediaBlank && selectedEntry?.bsd == nil))
-                    .help("正常推出当前光盘，无盘或设备忙时不可用。此操作不写盘，通常需要数秒至半分钟。请等托盘弹出后再取盘。")
+                    .help("\(shortcuts.titleWithShortcut(for: .eject))。无盘或设备忙时不可用。此操作不写盘，通常需要数秒至半分钟。请等托盘弹出后再取盘。")
                 }.onChange(of: selectedDrive) { _ in updateSelection() }
                 if let manualRefreshNotice {
                     Text(manualRefreshNotice).font(.callout).foregroundStyle(.orange)
