@@ -3,8 +3,8 @@ set -euo pipefail
 
 project_dir=${0:A:h}
 app_dir="$project_dir/build/DiscMate.app"
-discmate_version=${DISCMATE_VERSION:-0.4.2}
-discmate_build=${DISCMATE_BUILD_NUMBER:-2026112503}
+discmate_version=${DISCMATE_VERSION:-0.5.0}
+discmate_build=${DISCMATE_BUILD_NUMBER:-2026112711}
 [[ "$discmate_version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] || { print -u2 'DISCMATE_VERSION must be major.minor.patch'; exit 1; }
 [[ "$discmate_build" =~ '^[1-9][0-9]*$' ]] || { print -u2 'DISCMATE_BUILD_NUMBER must be positive'; exit 1; }
 discmate_signing_identity=${DISCMATE_SIGNING_IDENTITY:--}
@@ -21,6 +21,8 @@ xcrun clang -Wall -Wextra -Werror -O2 -isysroot "$sdk_path" -target arm64-apple-
   -c "$project_dir/Sources/DeviceBridge.c" -o "$project_dir/build/DeviceBridge.o"
 xcrun clang -Wall -Wextra -Werror -O2 -isysroot "$sdk_path" -target arm64-apple-macos13 \
   -c "$project_dir/Sources/MountAuthorization.c" -o "$project_dir/build/MountAuthorization.o"
+xcrun clang -Wall -Wextra -Werror -O2 -isysroot "$sdk_path" -target arm64-apple-macos13 \
+  -c "$project_dir/Sources/CloseDVDSession.c" -o "$project_dir/build/CloseDVDSession.o"
 xcrun clang -fobjc-arc -Wall -Wextra -Werror -O2 -isysroot "$sdk_path" -target arm64-apple-macos13 \
   -c "$project_dir/Sources/SystemBurnPanels.m" -o "$project_dir/build/SystemBurnPanels.o"
 xcrun clang -Wall -Wextra -Werror -O2 -isysroot "$sdk_path" -target arm64-apple-macos13 \
@@ -37,7 +39,7 @@ SWIFT_MODULECACHE_PATH=/tmp/discmate-swift-cache \
 SDKROOT="$sdk_path" \
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macos13 \
   -import-objc-header "$project_dir/Sources/DeviceBridge.h" \
-  "$project_dir/DiscMate.swift" "$project_dir"/Sources/*.swift "$project_dir/build/DeviceBridge.o" "$project_dir/build/MountAuthorization.o" "$project_dir/build/SystemBurnPanels.o" \
+  "$project_dir/DiscMate.swift" "$project_dir"/Sources/*.swift "$project_dir/build/DeviceBridge.o" "$project_dir/build/MountAuthorization.o" "$project_dir/build/SystemBurnPanels.o" "$project_dir/build/CloseDVDSession.o" \
   -o "$app_dir/Contents/MacOS/DiscMate" \
   -framework AppKit -framework SwiftUI -framework DiscRecording -framework DiscRecordingUI -framework DiskArbitration -framework IOKit -framework Security
 cat > "$app_dir/Contents/Info.plist" <<EOF

@@ -139,6 +139,7 @@ struct DiagnosticsView: View {
 
     private func taskLabel(_ kind: DiagnosticTaskKind) -> String {
         switch kind {
+        case .closeSession: return "手动关闭会话"
         case .dataBurn: return "首次数据刻录"
         case .firstBurnSummary: return "查看首次刻录摘要"
         case .append: return "追加刻录"

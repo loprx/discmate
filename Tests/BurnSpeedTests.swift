@@ -17,6 +17,23 @@ enum BurnSpeedTests {
         precondition(BurnSpeedOptions.normalized([Double.greatestFiniteMagnitude, Double.leastNonzeroMagnitude]).isEmpty)
         let automatic = try BurnSpeedSelection.automatic.requestedSpeed(supported: [])
         precondition(automatic == nil)
+        let reduced = BurnSpeedSelection.reduced
+        let dvd = [4, 6, 8].map { Double($0 * 1385) }
+        let sixX = try reduced.requestedSpeed(supported: dvd)
+        precondition(sixX == Float(6 * 1385))
+        let exact = try reduced.requestedSpeed(supported: [10, 2, 8, 8])
+        precondition(exact == 8)
+        let lowerPanel = try reduced.requestedSpeed(supported: dvd, panelLimit: 5540)
+        let higherPanel = try reduced.requestedSpeed(supported: dvd, panelLimit: 11080)
+        precondition(lowerPanel == 5540 && higherPanel == sixX)
+        for unsupported: [Double] in [[], [8], [7, 8], [.nan, 0]] {
+            do {
+                _ = try reduced.requestedSpeed(supported: unsupported)
+                preconditionFailure("Missing lower speed must not request maximum")
+            } catch let error as BurnSpeedUnavailable { precondition(error.noReducedSpeed) }
+        }
+        let manualMax = try BurnSpeedSelection.kilobytesPerSecond(8).requestedSpeed(supported: [8])
+        precondition(manualMax == 8)
         let manual = try BurnSpeedSelection.kilobytesPerSecond(5540).requestedSpeed(supported: speeds)
         precondition(manual == 5540)
         for value in [Double.nan, Double.infinity, -1, 0, 16620] {

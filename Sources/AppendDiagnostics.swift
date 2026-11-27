@@ -13,7 +13,9 @@ enum AppendDiagnostics {
     static func rejection(_ error: Error) -> (error: NSError, evidence: DiagnosticEvidence) {
         let failure = error as? AppendPreflightFailure
         let reason: DiagnosticAppendFailure
-        if let legacy = error as? LegacyPreflightFailure {
+        if error is DiscWriteRejected {
+            reason = .unavailable
+        } else if let legacy = error as? LegacyPreflightFailure {
             switch legacy {
             case .changedMedium, .changedDrive: reason = .mediaChanged
             case .unavailableCapability: reason = .unavailable

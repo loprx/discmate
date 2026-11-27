@@ -7,13 +7,13 @@ struct UDFAppendUnsupported: LocalizedError, CustomNSError {
     var errorCode: Int { 1001 }
     var errorDescription: String? {
         let version = String(format: "%x.%02x", revision >> 8, revision & 0xff)
-        return "检测到 UDF \(version) 光盘（分区映射类型 \(partitionMapType)）；当前版本尚不能安全导入 UDF 旧目录并追加。本次未写盘。"
+        return "检测到 UDF \(version) 光盘（分区映射类型 \(partitionMapType)）；当前版本不能安全导入这张盘的目录或分配方式。本次未写盘。"
     }
 }
 
 /// Read-only recognition of the UDF layout that an append writer must preserve.
 /// Addresses here are physical 2048-byte sectors; no media writes are exposed.
-struct UDFVolumeProbe {
+struct UDFVolumeProbe: Sendable {
     let revision: UInt16
     let blockBytes: UInt32
     let partitionMapType: UInt8
@@ -21,8 +21,9 @@ struct UDFVolumeProbe {
     let partitionBlocks: UInt32
     let partitionNumber: UInt16
     let fileSetBlock: UInt32
+    let label: String?
 
-    static func inspect(sessionStart: UInt32, capacityBlocks: UInt64,
+    static func inspect(sessionStart: UInt32, capacityBlocks: UInt64, allowISOBridge: Bool = false,
                         readSector: (UInt32) throws -> Data) throws -> UDFVolumeProbe {
         func sector(_ offset: UInt32) throws -> Data {
             let address = UInt64(sessionStart) + UInt64(offset)
@@ -31,9 +32,20 @@ struct UDFVolumeProbe {
             guard data.count == 2048 else { throw DiscFailure("UDF 描述符读取不完整。") }
             return data
         }
-        let first = try sector(16)
+        var offset: UInt32 = 16
+        var first = try sector(offset)
+        if allowISOBridge, first[1..<6] == Data("CD001".utf8) {
+            // Bridge volumes place UDF recognition after the ISO descriptor set.
+            while offset < 48, first[1..<6] == Data("CD001".utf8), first[6] == 1 {
+                let terminator = first[0] == 255
+                offset += 1
+                first = try sector(offset)
+                if terminator { break }
+                guard first[1..<6] == Data("CD001".utf8) else { throw DiscFailure("ISO 卷描述符缺少结束标记。") }
+            }
+        }
         guard first.subdata(in: 1..<6) == Data("BEA01".utf8) else { throw DiscFailure("没有 UDF 卷识别序列。") }
-        let recognition = try sector(17)
+        let recognition = try sector(offset + 1)
         guard ["NSR02", "NSR03"].contains(String(decoding: recognition[1..<6], as: UTF8.self)) else {
             throw DiscFailure("不支持当前 UDF 卷识别序列。")
         }
@@ -78,9 +90,14 @@ struct UDFVolumeProbe {
               number32(logical, 252) < blocks else {
             throw DiscFailure("当前 UDF 分区映射无法安全定位文件目录。")
         }
+        let nameLength = Int(logical[211])
+        let label: String?
+        if (2...127).contains(nameLength), [8, 16].contains(logical[84]) {
+            label = String(data: logical[85..<(84 + nameLength)], encoding: logical[84] == 8 ? .isoLatin1 : .utf16BigEndian)
+        } else { label = nil }
         return UDFVolumeProbe(revision: number16(logical, 240), blockBytes: 2048,
                               partitionMapType: mapType, partitionStart: start, partitionBlocks: blocks,
-                              partitionNumber: number16(partition, 22), fileSetBlock: number32(logical, 252))
+                              partitionNumber: number16(partition, 22), fileSetBlock: number32(logical, 252), label: label)
     }
 
     private static func number16(_ data: Data, _ at: Int) -> UInt16 {
@@ -90,7 +107,7 @@ struct UDFVolumeProbe {
         (0..<4).reduce(UInt32(0)) { $0 | UInt32(data[at + $1]) << (8 * $1) }
     }
     static func checkTag(_ data: Data, id: UInt16, address: UInt32) throws {
-        guard number16(data, 0) == id, number32(data, 12) == address else {
+        guard data.count >= 16, number16(data, 0) == id, number32(data, 12) == address else {
             throw DiscFailure("UDF 描述符类型或地址不一致。")
         }
         let checksum = (0..<16).filter { $0 != 4 }.reduce(0) { $0 + Int(data[$1]) } & 0xff

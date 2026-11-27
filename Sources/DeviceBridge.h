@@ -20,3 +20,20 @@ int dm_registry_optical_probe(DMOpticalRegistryProbe *result);
 void *dm_authorize_mount(const char *helper, int32_t *status);
 void dm_release_authorization(void *authorization);
 int32_t dm_authorized_mount(void *authorization, const char *helper, const char *bsd, const char *identity, const char *start, char *output, size_t capacity);
+
+// Dedicated DVD+R recovery operation. No caller-supplied CDB or close mode.
+typedef struct {
+    int32_t ioStatus, releaseStatus;
+    uint8_t opcode, serviceResponse, taskStatus, attempted, exclusive;
+    uint8_t sense[32];
+} DMCloseResult;
+int32_t dm_close_dvd_session(const char *drivePath, uint64_t mediaID, uint16_t session,
+    uint16_t track, uint32_t start, uint32_t blocks, const uint8_t *descriptor, DMCloseResult *result);
+
+// Values are bound to the scanned previous data track and the two open fragments.
+typedef struct {
+    uint16_t session, track, previousTrack, speedKBps;
+    uint32_t start, blocks, tailBlocks, previousStart, previousBlocks;
+} DMReservation;
+int32_t dm_resume_reserved(const char *path, uint64_t mediaID, DMReservation target,
+    const uint8_t *previousDescriptor, const uint8_t *image, size_t bytes, DMCloseResult *result);

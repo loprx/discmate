@@ -4,7 +4,7 @@ import CoreFoundation
 // These enums are the export boundary. Never add user-facing error strings,
 // source paths, volume labels, serials, hashes or raw backend dictionaries here.
 enum DiagnosticTaskKind: String, Codable, CaseIterable {
-    case dataBurn, firstBurnSummary, append, appendPreparation, audioBurn, imageBurn, videoBurn, erase, readback, openLatest, eject, deviceRefresh, refreshRequest, clipboardImport, softwareUpdate, sourceSelection
+    case closeSession, dataBurn, firstBurnSummary, append, appendPreparation, audioBurn, imageBurn, videoBurn, erase, readback, openLatest, eject, deviceRefresh, refreshRequest, clipboardImport, softwareUpdate, sourceSelection
 }
 
 enum DiagnosticMediaType: String, Codable {
@@ -29,6 +29,7 @@ enum DiagnosticEventKind: String, Codable {
     case panelFinished, panelCreationFailed, backendObservationUnavailable, backendReleased, registryObserved, deviceStatusObserved
     case preflightIdentityRejected, preflightCapabilityRejected, preflightUnavailable
     case appendSourcesChecked, appendSourcesRevalidated, appendPreflightRejected
+    case sessionCloseChecked, sessionCloseConfirmed, sessionCloseRejected, sessionCloseUnconfirmed
     case filesystemUnsupported
     case refreshRequested, refreshCoalesced, refreshDispatched
     case summaryViewed
@@ -80,10 +81,17 @@ struct DiagnosticDeviceEvidence: Codable, Equatable, Sendable {
 }
 
 enum DiagnosticFilesystem: String, Codable, Sendable {
-    case udf102, udfOther
+    case iso9660, isoJoliet, isoUdfBridge, isoWithUnknownExtension, udf102, udfOther
+}
+
+enum DiscWriteState: String, Codable, Sendable {
+    case noDisc, unknown, busy, readOnly, unsupportedDrive, full, notAppendable
+    case blankCandidate, appendCandidate, unsupportedFormat, unsupportedBridge, incompleteSession
+    case noWritableTrack, insufficientSpace, appendReady
 }
 
 struct DiagnosticDiscEvidence: Codable, Equatable, Sendable {
+    let writeState: DiscWriteState?
     let filesystem: DiagnosticFilesystem?
     let latestSession: UInt16?
     let latestStartLBA: UInt32?
@@ -96,7 +104,8 @@ struct DiagnosticDiscEvidence: Codable, Equatable, Sendable {
     init(latestSession: UInt16? = nil, latestStartLBA: UInt32? = nil,
          nextWritableLBA: UInt32? = nil, freeBlocks: UInt32? = nil,
          rootEntryCount: UInt32? = nil, appendable: Bool? = nil, imageBytes: UInt64? = nil,
-         filesystem: DiagnosticFilesystem? = nil) {
+         filesystem: DiagnosticFilesystem? = nil, writeState: DiscWriteState? = nil) {
+        self.writeState = writeState
         self.filesystem = filesystem
         self.latestSession = latestSession; self.latestStartLBA = latestStartLBA
         self.nextWritableLBA = nextWritableLBA; self.freeBlocks = freeBlocks
@@ -201,9 +210,20 @@ struct DiagnosticSense: Codable, Equatable, Sendable {
     var isValid: Bool { (0x70...0x73).contains(responseCode) && key <= 0x0F }
 }
 
+struct DiagnosticSessionClose: Codable, Equatable, Sendable {
+    let lastOpcode: UInt8
+    let attempted: Bool
+    let exclusive: Bool
+    let serviceResponse: UInt8
+    let taskStatus: UInt8
+    let commandResult: Int32
+    let releaseResult: Int32?
+}
+
 struct DiagnosticEvidence: Codable, Equatable, Sendable {
     let backendState: DiagnosticBackendState?
     let requestedSpeedAutomatic: Bool?
+    let reducedSpeedRequested: Bool?
     let verifyAfterWriteRequested: Bool?
     let verifyAfterWriteAccepted: Bool?
     let requestedSpeedKBps: Double?
@@ -213,18 +233,21 @@ struct DiagnosticEvidence: Codable, Equatable, Sendable {
     let disc: DiagnosticDiscEvidence?
     let refresh: DiagnosticRefreshEvidence?
     let opticalRegistry: DiagnosticOpticalRegistryEvidence?
+    let sessionClose: DiagnosticSessionClose?
     let append: DiagnosticAppendEvidence?
 
     init(backendState: DiagnosticBackendState? = nil, requestedSpeedKBps: Double? = nil,
          actualSpeedKBps: Double? = nil, requestedSpeedAutomatic: Bool? = nil,
+         reducedSpeedRequested: Bool? = nil,
          verifyAfterWriteRequested: Bool? = nil, verifyAfterWriteAccepted: Bool? = nil,
          sense: DiagnosticSense? = nil,
          device: DiagnosticDeviceEvidence? = nil, disc: DiagnosticDiscEvidence? = nil,
          refresh: DiagnosticRefreshEvidence? = nil,
          opticalRegistry: DiagnosticOpticalRegistryEvidence? = nil,
-         append: DiagnosticAppendEvidence? = nil) {
+         sessionClose: DiagnosticSessionClose? = nil, append: DiagnosticAppendEvidence? = nil) {
         self.backendState = backendState
         self.requestedSpeedAutomatic = requestedSpeedAutomatic
+        self.reducedSpeedRequested = reducedSpeedRequested
         self.verifyAfterWriteRequested = verifyAfterWriteRequested
         self.verifyAfterWriteAccepted = verifyAfterWriteAccepted
         // DiscRecording reports its maximum-speed sentinel as a number even
@@ -236,6 +259,7 @@ struct DiagnosticEvidence: Codable, Equatable, Sendable {
         self.disc = disc
         self.refresh = refresh?.isValid == true ? refresh : nil
         self.opticalRegistry = opticalRegistry?.isValid == true ? opticalRegistry : nil
+        self.sessionClose = sessionClose
         self.append = append?.isValid == true ? append : nil
     }
 
@@ -256,10 +280,11 @@ struct DiagnosticEvidence: Codable, Equatable, Sendable {
     fileprivate func includingSense(_ parsed: DiagnosticSense?) -> Self {
         Self(backendState: backendState, requestedSpeedKBps: requestedSpeedKBps,
              actualSpeedKBps: actualSpeedKBps, requestedSpeedAutomatic: requestedSpeedAutomatic,
+             reducedSpeedRequested: reducedSpeedRequested,
              verifyAfterWriteRequested: verifyAfterWriteRequested,
              verifyAfterWriteAccepted: verifyAfterWriteAccepted,
              sense: sense ?? parsed, device: device, disc: disc, refresh: refresh,
-             opticalRegistry: opticalRegistry, append: append)
+             opticalRegistry: opticalRegistry, sessionClose: sessionClose, append: append)
     }
 }
 

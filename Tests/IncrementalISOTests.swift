@@ -45,6 +45,24 @@ enum IncrementalISOTests {
         let next = RecordedTrack(number: 2, session: 2, start: start, blocks: capacity - start, blank: true, damaged: false, nextWritable: start, freeBlocks: capacity - start)
         let snapshot = SessionSnapshot(identity: MediaIdentity(bsd: "offline-only", registryID: 0, bytes: UInt64(capacity) * 2048),
             tracks: [first, next], latest: first, volume: volume, rootEntries: oldEntries, descriptorHash: "offline", appendable: true)
+        // Two untouched fragments in session 3. The prepared address must
+        // select the smaller reserved one, not the much larger trailing NWA.
+        if !large {
+            let prev = RecordedTrack(number: 2, session: 2, start: 160800, blocks: 464, blank: false, damaged: false, nextWritable: nil, freeBlocks: 0)
+            let target = RecordedTrack(number: 3, session: 3, start: 163312, blocks: 60208, blank: true, damaged: false, nextWritable: 163312, freeBlocks: 60208)
+            let tail = RecordedTrack(number: 4, session: 3, start: 223536, blocks: 2071568, blank: true, damaged: false, nextWritable: 223536, freeBlocks: 2071568)
+            let tracks = [first, prev, target, tail]
+            let disc = DMDisc(status: 1, lastState: 1, sessions: 3, firstTrack: 3, lastTrack: 4)
+            let reservation = ISO9660.blankReservation(tracks, disc: disc, capacity: UInt64(capacity))
+            precondition(reservation == target)
+            let recovery = SessionSnapshot(identity: snapshot.identity, tracks: tracks, latest: prev, volume: volume,
+                rootEntries: oldEntries, descriptorHash: "fixture", appendable: false, incompleteSession: true, reservedTrack: reservation)
+            let built = try IncrementalISO.build(snapshot: recovery, verified: [], sources: [newText],
+                directory: root.appendingPathComponent("reserved"))
+            let expectedNew = try FileProof.capture(newText)
+            precondition(built.proof.expectedStart == target.start && built.proof.previousSession == 2 &&
+                built.proof.preserved?.count == oldEntries.count && built.proof.files.first?.sha256 == expectedNew.sha256)
+        }
         // All old source files disappear before preparation. The only old payload
         // remaining is the fixture ISO used later by the independent reader;
         // its URL is never passed to the builder.

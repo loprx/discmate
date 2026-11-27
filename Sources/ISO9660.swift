@@ -15,6 +15,10 @@ struct RecordedTrack: Equatable, Sendable {
     let damaged: Bool
     let nextWritable: UInt32?
     let freeBlocks: UInt32
+    var untouchedWritable: Bool {
+        blank && !damaged && nextWritable == start && freeBlocks == blocks && blocks > 0
+    }
+
     func contains(_ lba: UInt32, bytes: UInt32) -> Bool {
         let count = (UInt64(bytes) + 2047) / 2048
         return !blank && !damaged && lba >= start && UInt64(lba) + count <= UInt64(start) + UInt64(blocks)
@@ -77,7 +81,39 @@ enum ISO9660 {
         }
         return ISOEntry(name: name, lba: try both32(data, 2), bytes: try both32(data, 10), directory: data[25] & 2 != 0)
     }
-    static func directory(_ data: Data, joliet: Bool) throws -> [ISOEntry] {
+    // The primary namespace can be read even when it is only a fallback view
+    // of richer metadata. Import only ordinary files/directories whose names
+    // and extents really describe the contents we would carry forward.
+    static func canImportPrimaryRecord(_ raw: Data, entry: ISOEntry) -> Bool {
+        guard raw[25] == (entry.directory ? 2 : 0) else { return false }
+        let nameBytes = Int(raw[32])
+        var offset = 33 + nameBytes + (nameBytes.isMultiple(of: 2) ? 1 : 0)
+        while offset < raw.count {
+            if raw[offset...].allSatisfy({ $0 == 0 }) { break }
+            guard offset + 4 <= raw.count else { return false }
+            let length = Int(raw[offset + 2]), end = offset + length
+            guard length >= 4, end <= raw.count else { return false }
+            switch String(decoding: raw[offset..<(offset + 2)], as: UTF8.self) {
+            case "SP", "ER", "RR", "TF", "ST", "AA":
+                break  // Ordinary SUSP declarations, dates and Finder attributes.
+            case "PX":
+                guard length >= 12, let mode = try? both32(raw, offset + 4),
+                      mode & 0o170000 == (entry.directory ? 0o040000 : 0o100000) else { return false }
+            case "NM":
+                guard length >= 5, raw[offset + 4] == 0,
+                      String(data: raw[(offset + 5)..<end], encoding: .utf8) == entry.name else { return false }
+            default:
+                // Links, alternate/continued namespaces and special files
+                // require a different importer; keep the disc readable.
+                return false
+            }
+            offset = end
+        }
+        return true
+    }
+
+    static func directory(_ data: Data, joliet: Bool,
+                          inspect: ((Data, ISOEntry) -> Void)? = nil) throws -> [ISOEntry] {
         var offset = 0; var entries: [ISOEntry] = []; var names = Set<String>()
         while offset < data.count {
             let length = Int(data[offset])
@@ -85,7 +121,9 @@ enum ISO9660 {
             guard length >= 34, offset + length <= data.count, offset % sectorBytes + length <= sectorBytes else {
                 throw DiscFailure("ISO 目录项越过扇区边界。")
             }
-            let entry = try record(data.subdata(in: offset..<(offset + length)), joliet: joliet)
+            let raw = data.subdata(in: offset..<(offset + length))
+            let entry = try record(raw, joliet: joliet)
+            inspect?(raw, entry)
             if entry.name != ".", entry.name != ".." {
                 guard names.insert(entry.name).inserted else { throw DiscFailure("ISO 目录包含重名文件。") }
                 entries.append(entry)
@@ -102,6 +140,25 @@ enum ISO9660 {
             throw DiscFailure("当前仅支持每会话一个数据轨道的 DVD+R。")
         }
         return last
+    }
+
+    static func blankReservation(_ tracks: [RecordedTrack], disc: DMDisc, capacity: UInt64) -> RecordedTrack? {
+        guard disc.status == 1, disc.lastState == 1, tracks.count >= 3 else { return nil }
+        let prior = tracks[tracks.count - 3]
+        let reserved = tracks[tracks.count - 2]
+        let tail = tracks[tracks.count - 1]
+        guard prior.session < 65535, prior.session + 1 == reserved.session, reserved.session == disc.sessions,
+              reserved.number == disc.firstTrack, tail.number == disc.lastTrack, reserved.number < 64,
+              tail.session == reserved.session, reserved.number + 1 == tail.number else { return nil }
+        guard reserved.untouchedWritable, tail.untouchedWritable, reserved.start % 16 == 0,
+              reserved.blocks > 16, reserved.blocks % 16 == 0,
+              UInt64(reserved.start) + UInt64(reserved.blocks) + 16 == UInt64(tail.start),
+              UInt64(tail.start) + UInt64(tail.blocks) <= capacity else { return nil }
+        for recorded in tracks.dropLast(2) {
+            guard !recorded.blank, !recorded.damaged, recorded.nextWritable == nil,
+                  UInt64(recorded.start) + UInt64(recorded.blocks) <= UInt64(reserved.start) else { return nil }
+        }
+        return reserved
     }
 
     /// An interrupted DVD+R close may leave a readable data track followed by

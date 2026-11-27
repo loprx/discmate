@@ -79,6 +79,9 @@ struct AppendProof: Codable, Sendable {
     // Absent in legacy manifests, where every file has a source hash.
     var preserved: [PreservedFile]? = nil
     var directories: [String]? = nil
+    // Private manifest only. Older ISO-only manifests omit this field.
+    var udfLabel: String? = nil
+    var bridgePrimaryIDs: [String: Data]? = nil
     var allPaths: Set<String> { Set(files.map(\.path) + (preserved ?? []).map(\.path)) }
 
     /// Cheap UI eligibility check only. Full directory and extent validation
@@ -105,6 +108,12 @@ struct AppendProof: Codable, Sendable {
             throw DiscFailure("校验清单包含无效会话、文件名、重复文件、哈希或旧区段地址。")
         }
         let folders = Set(directories ?? [])
+        if let ids = bridgePrimaryIDs {
+            guard !ids.isEmpty, ids.count <= 32, Set(ids.keys).isSubset(of: allPaths),
+                  ids.values.allSatisfy({ !$0.isEmpty && $0.count <= 222 }) else {
+                throw DiscFailure("混合盘清单的 ISO 文件标识无效。")
+            }
+        }
         for path in names + Array(folders) {
             let parent = path.split(separator: "/").dropLast().joined(separator: "/")
             guard parent.isEmpty || folders.contains(parent) else {
@@ -115,6 +124,15 @@ struct AppendProof: Codable, Sendable {
 
     func validateDirectory(_ snapshot: SessionSnapshot) throws {
         try validateStructure()
+        if let udfLabel, snapshot.udf?.label != udfLabel {
+            throw DiscFailure("读回时 UDF 卷名或文件系统与清单不一致。")
+        }
+        if let ids = bridgePrimaryIDs {
+            guard let bridge = snapshot.bridge, Set(bridge.files.map(\.name)) == allPaths,
+                  ids.allSatisfy({ name, id in
+                      bridge.files.contains { $0.name == name && bridge.primaryIDs[$0.lba] == id }
+                  }) else { throw DiscFailure("混合盘读回时，UDF 目录或原有 ISO 文件名与清单不一致。") }
+        }
         guard snapshot.latest.session == previousSession + 1, snapshot.latest.start == expectedStart,
               snapshot.fileEntries.count == allPaths.count,
               Set(snapshot.directoryPaths) == Set(directories ?? []),

@@ -13,6 +13,8 @@ struct DeviceChangeSnapshot: Equatable {
     var mediaType: String?
     var blank: Bool?
     var appendable: Bool?
+    var freeBlocks: UInt32?
+    var usedBlocks: UInt32?
     var burnSpeeds: [Double]
 
     init(_ info: [AnyHashable: Any]) {
@@ -24,6 +26,8 @@ struct DeviceChangeSnapshot: Equatable {
         mediaType = media[DRDeviceMediaTypeKey] as? String
         blank = (media[DRDeviceMediaIsBlankKey] as? NSNumber)?.boolValue
         appendable = (media[DRDeviceMediaIsAppendableKey] as? NSNumber)?.boolValue
+        freeBlocks = DiscWriteState.freeBlocks(media as NSDictionary)
+        usedBlocks = (media[DRDeviceMediaBlocksUsedKey] as? NSNumber).flatMap { UInt32($0.stringValue) }
         let values = (media[DRDeviceBurnSpeedsKey] ?? info[DRDeviceBurnSpeedsKey]) as? [NSNumber] ?? []
         burnSpeeds = Array(Set(values.map(\.doubleValue).filter { $0.isFinite && $0 > 0 })).sorted()
     }
@@ -94,6 +98,7 @@ final class DeviceChangeObserver: NSObject, ObservableObject {
         var deferredByBusy = false
     }
     @Published private(set) var revision: UInt64 = 0
+    @Published private(set) var inventoryPending = false
     private(set) var lastDelivery = Delivery()
     private var center: DRNotificationCenter?
     private var gate = DeviceChangeGate()
@@ -114,6 +119,7 @@ final class DeviceChangeObserver: NSObject, ObservableObject {
         delivery = nil
         generation &+= 1
         unregister()
+        inventoryPending = false
         let suspended = gate.suspended
         gate = DeviceChangeGate()
         gate.setSuspended(suspended)
@@ -145,6 +151,7 @@ final class DeviceChangeObserver: NSObject, ObservableObject {
     }
 
     private func scheduleDelivery() {
+        if inventoryPending != gate.pending { inventoryPending = gate.pending }
         // A single finite coalescing delay, started by events only. Repeated identical
         // status notifications neither deliver more revisions nor reset the delay.
         guard gate.canDeliver else {
@@ -164,6 +171,7 @@ final class DeviceChangeObserver: NSObject, ObservableObject {
             guard let self, self.generation == expected else { return }
             self.delivery = nil
             guard self.center != nil, self.gate.consume() else { return }
+            self.inventoryPending = false
             self.lastDelivery = self.pendingDelivery
             self.pendingDelivery = Delivery()
             self.revision &+= 1

@@ -155,6 +155,7 @@ struct BurnProgress: Sendable {
         case "EjectConfirmed": return .ejectCompleted
         case "MediaReturned": return .mediaReturnedDuringCompletion
         case "PreflightFailed": return .failed
+        case "BurnSpeedUnavailable", "MediaWriteRejected": return .preflightCapabilityRejected
         case "AppendPreflightFailed": return .appendPreflightRejected
         case "AppendSourcesRevalidated": return .appendSourcesRevalidated
         default: return kind == .finishing ? .finishing : .waiting

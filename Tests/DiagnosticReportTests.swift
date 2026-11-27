@@ -1,7 +1,35 @@
 import Foundation
 
 enum DiagnosticReportTests {
+    private static func checkCloseReports() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DiagnosticReportStore(directory: directory, appVersion: "0.4.2", appBuild: "2026112708")
+        let cases: [(DiagnosticEventKind, DiagnosticOutcome, UInt8, Bool, Int32)] = [
+            (.sessionCloseConfirmed, .completed, 0x51, true, 0),
+            (.sessionCloseRejected, .failed, 0x46, false, -1),
+            (.sessionCloseUnconfirmed, .needsRecovery, 0x5b, true, -2)]
+        for (event, outcome, opcode, attempted, code) in cases {
+            let id = store.startTask(kind: .closeSession, media: .dvdPlusR)
+            let close = DiagnosticSessionClose(lastOpcode: opcode, attempted: attempted, exclusive: true,
+                serviceResponse: 2, taskStatus: 0, commandResult: code, releaseResult: 0)
+            let error = code == 0 ? nil : NSError(domain: NSOSStatusErrorDomain, code: Int(code),
+                userInfo: [NSLocalizedDescriptionKey: "/Users/private/个人光盘"])
+            store.record(taskID: id, event: event, error: error, evidence: DiagnosticEvidence(sessionClose: close))
+            store.finish(taskID: id, outcome: outcome)
+            let data = try await store.exportData(taskID: id)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let report = try decoder.decode(DiagnosticReport.self, from: data)
+            precondition(report.id == id && report.task == .closeSession && report.outcome == outcome)
+            precondition(report.events.last?.evidence?.sessionClose == close)
+            precondition(!String(decoding: data, as: UTF8.self).contains("个人光盘"))
+        }
+    }
+
     static func run() async throws {
+        try await checkCloseReports()
+
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("discmate-diagnostics-tests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let secret = "/Users/private-person/Downloads/私人合同.pdf?token=secret-token"
@@ -423,6 +451,41 @@ enum DiagnosticReportTests {
         let autoRestart = DiagnosticReportStore(directory: directory)
         let autoRestored = try await autoRestart.exportData(taskID: autoID)
         precondition(autoRestored == autoData)
+
+        for state: DiscWriteState in [.appendCandidate, .appendReady, .notAppendable, .full, .unknown, .noWritableTrack] {
+            let id = store.startTask(kind: .appendPreparation)
+            let evidence = DiagnosticEvidence(disc: DiagnosticDiscEvidence(writeState: state))
+            let accepted = state == .appendReady
+            store.record(taskID: id, event: accepted ? .deviceStatusObserved : .preflightCapabilityRejected, evidence: evidence)
+            store.finish(taskID: id, outcome: accepted ? .completed : .failed)
+            let result = try await decode(store.exportData(taskID: id))
+            precondition(result.events.contains { $0.evidence?.disc?.writeState == state })
+            precondition(result.outcome == (accepted ? .completed : .failed))
+        }
+
+        for supported: [Double] in [[5540, 8310, 11080], [11080]] {
+            let id = store.startTask(kind: .append)
+            do {
+                let rate = try BurnSpeedSelection.reduced.requestedSpeed(supported: supported)
+                store.record(taskID: id, event: .deviceStatusObserved, evidence:
+                    DiagnosticEvidence(requestedSpeedKBps: rate.map(Double.init), reducedSpeedRequested: true))
+                store.finish(taskID: id, outcome: .completed)
+            } catch is BurnSpeedUnavailable {
+                let warning = BurnProgress(kind: .warning, state: "BurnSpeedUnavailable", fraction: nil,
+                    detail: "", evidence: DiagnosticEvidence(reducedSpeedRequested: true))
+                store.record(taskID: id, event: warning.diagnosticEventKind, evidence: warning.evidence)
+                store.finish(taskID: id, outcome: .failed)
+            }
+            let decoded = try await decode(store.exportData(taskID: id))
+            let event = decoded.events.first { $0.evidence?.reducedSpeedRequested == true }
+            precondition(event != nil && event?.evidence?.actualSpeedKBps == nil)
+            if supported.count == 1 {
+                precondition(decoded.outcome == .failed && event?.kind == .preflightCapabilityRejected)
+                precondition(event?.evidence?.requestedSpeedKBps == nil)
+            } else {
+                precondition(decoded.outcome == .completed && event?.evidence?.requestedSpeedKBps == 8310)
+            }
+        }
 
         let discID = store.startTask(kind: .append)
         let disc = DiagnosticDiscEvidence(latestSession: 3, latestStartLBA: 5_024,

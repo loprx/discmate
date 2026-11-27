@@ -15,7 +15,7 @@ struct UDFRecordedEntry: Equatable {
 /// A bounded, read-only UDF 1.02 directory walker for physical type-1 partitions.
 /// Unsupported allocation forms fail closed. It never scans unrecorded sectors.
 enum UDFDirectoryReader {
-    static func entries(volume: UDFVolumeProbe, capacityBlocks: UInt64,
+    static func entries(volume: UDFVolumeProbe, capacityBlocks: UInt64, strictImport: Bool = false,
                         readSector: (UInt32) throws -> Data) throws -> [UDFRecordedEntry] {
         guard volume.revision == 0x0102, volume.partitionMapType == 1 else {
             throw DiscFailure("当前只支持解析 UDF 1.02 单物理分区目录。")
@@ -79,6 +79,9 @@ enum UDFDirectoryReader {
             try UDFVolumeProbe.checkTag(data, id: 261, address: block)
             let fileType = data[27], allocationType = u16(data, 34) & 7
             guard fileType == 4 || fileType == 5 else { throw DiscFailure("UDF 文件类型未支持。") }
+            if strictImport, (fileType == 5 && u16(data, 48) != 1) || u32(data, 112) != 0 {
+                throw UDFAppendUnsupported(revision: volume.revision, partitionMapType: volume.partitionMapType)
+            }
             let bytes = u64(data, 56)
             let eaBytes = Int(u32(data, 168)), adBytes = Int(u32(data, 172))
             guard eaBytes <= 2048 - 176, adBytes <= 2048 - 176 - eaBytes else {
@@ -134,6 +137,14 @@ enum UDFDirectoryReader {
                 let record = Data(body[cursor..<(cursor + length)])
                 try UDFVolumeProbe.checkTag(record, id: 257, address: u32(record, 12))
                 let flags = body[cursor + 18]
+                if strictImport {
+                    guard flags == 0 || flags == 2 || flags == 10,
+                          entry.extents.count == 1, let directoryExtent = entry.extents.first,
+                          directoryExtent.lba >= volume.partitionStart,
+                          UInt64(u32(record, 12)) == UInt64(directoryExtent.lba - volume.partitionStart) + UInt64(cursor / 2048) else {
+                        throw UDFAppendUnsupported(revision: volume.revision, partitionMapType: volume.partitionMapType)
+                    }
+                }
                 if flags & 0x0c == 0 { // Skip parent and deleted FIDs.
                     let component = try name(Data(body[(cursor + 38 + implementationBytes)..<(cursor + unpadded)]))
                     guard names.insert(component).inserted else { throw DiscFailure("UDF 目录有重名文件。") }

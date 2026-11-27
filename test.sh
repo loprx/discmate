@@ -6,11 +6,17 @@ test_dir=$(mktemp -d /tmp/discmate-tests.XXXXXX)
 sdk_path=$(xcrun --sdk macosx --show-sdk-path)
 xcrun clang -Wall -Wextra -Werror -isysroot "$sdk_path" -target arm64-apple-macos13 \
   -c "$project_dir/Sources/DeviceBridge.c" -o "$test_dir/bridge.o"
+xcrun clang -Wall -Wextra -Werror -isysroot "$sdk_path" -target arm64-apple-macos13 \
+  "$project_dir/Tests/CloseDVDSessionTests.c" "$test_dir/bridge.o" -framework IOKit -framework CoreFoundation -o "$test_dir/close-tests"
+"$test_dir/close-tests"
+xcrun clang -Wall -Wextra -Werror -isysroot "$sdk_path" -target arm64-apple-macos13 \
+  "$project_dir/Tests/ReservedTrackTests.c" "$test_dir/bridge.o" -framework IOKit -framework CoreFoundation -o "$test_dir/reserved-tests"
+"$test_dir/reserved-tests"
 CLANG_MODULE_CACHE_PATH=/tmp/discmate-clang-cache SDKROOT="$sdk_path" \
 xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   -import-objc-header "$project_dir/Sources/DeviceBridge.h" \
   "$project_dir/Sources/ISO9660.swift" "$project_dir/Sources/DVDSessionReader.swift" \
-  "$project_dir/Sources/UDFVolumeProbe.swift" "$project_dir/Sources/UDFDirectoryReader.swift" "$project_dir/Sources/UDFIncremental.swift" "$project_dir/Tests/UDFVolumeProbeTests.swift" \
+  "$project_dir/Sources/PureUDFSession.swift" "$project_dir/Sources/UDFEncoding.swift" "$project_dir/Sources/BridgeSession.swift" "$project_dir/Sources/HybridUDF.swift" "$project_dir/Sources/UDFVolumeProbe.swift" "$project_dir/Sources/UDFDirectoryReader.swift" "$project_dir/Sources/UDFIncremental.swift" "$project_dir/Tests/UDFVolumeProbeTests.swift" \
   "$project_dir/Sources/RecordedDirectoryTree.swift" "$project_dir/Tests/RecordedDirectoryTreeTests.swift" \
   "$project_dir/Sources/MountedSessionDirectory.swift" "$project_dir/Tests/MountedSessionDirectoryTests.swift" \
   "$project_dir/Sources/TestAppendService.swift" "$project_dir/Tests/CoreTests.swift" \
@@ -23,6 +29,7 @@ xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   "$project_dir/Sources/SystemTaskProgress.swift" "$project_dir/Tests/SystemTaskProgressTests.swift" \
   "$project_dir/Sources/BurnSpeed.swift" "$project_dir/Tests/BurnSpeedTests.swift" \
   "$project_dir/Sources/DeviceChangeObserver.swift" "$project_dir/Tests/DeviceChangeObserverTests.swift" \
+  "$project_dir/Sources/DiscWriteState.swift" "$project_dir/Tests/DiscWriteStateTests.swift" \
   "$project_dir/Sources/DiagnosticReport.swift" "$project_dir/Tests/DiagnosticReportTests.swift" \
   "$project_dir/Sources/SoftwareUpdate.swift" "$project_dir/Tests/SoftwareUpdateTests.swift" \
   "$project_dir/Sources/DiagnosticPreview.swift" "$project_dir/Tests/DiagnosticPreviewTests.swift" \

@@ -4,7 +4,7 @@ set -euo pipefail
 project_dir=${0:A:h}
 test_dir=$(mktemp -d /tmp/discmate-native-tests.XXXXXX)
 sdk_path=$(xcrun --sdk macosx --show-sdk-path)
-for source in DeviceBridge MountAuthorization; do
+for source in DeviceBridge MountAuthorization CloseDVDSession; do
   xcrun clang -Wall -Wextra -Werror -isysroot "$sdk_path" -target arm64-apple-macos13 \
     -c "$project_dir/Sources/$source.c" -o "$test_dir/$source.o"
 done

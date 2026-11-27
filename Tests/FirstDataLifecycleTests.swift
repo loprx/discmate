@@ -32,10 +32,10 @@ struct FirstDataLifecycleTests {
         let legacyPreflight = LegacyMediaPreflight(drivePath: "offline", driveID: 1, mediaID: 2,
                                                    bsd: "offline", wasBlank: true)
         try legacyPreflight.validate(driveID: 1, mediaID: 2, bsd: "offline")
-        try legacyPreflight.validateBurnCapability(isBlank: true, isAppendable: false)
-        for state in [(false, true), (false, false)] {
+        try legacyPreflight.validateBurnCapability(.blankCandidate)
+        for state: DiscWriteState in [.appendCandidate, .notAppendable, .unknown, .full] {
             do {
-                try legacyPreflight.validateBurnCapability(isBlank: state.0, isAppendable: state.1)
+                try legacyPreflight.validateBurnCapability(state)
                 preconditionFailure("legacy task accepted changed media capability")
             } catch { }
         }

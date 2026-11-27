@@ -56,7 +56,8 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
         taskID = id; isBusy = true; progress = SystemTaskProgress(); actualSpeedKBps = nil
         firstDataVerificationObserved = false
         diagnostics.record(taskID: id, event: .preparing,
-            evidence: DiagnosticEvidence(verifyAfterWriteRequested: request.verifyAfterWrite))
+            evidence: DiagnosticEvidence(reducedSpeedRequested: request.speed == .reduced,
+                verifyAfterWriteRequested: request.verifyAfterWrite))
         message = "正在检查空白盘、文件与刻录设置…"
         Task { @MainActor in
             var outcome = DiagnosticOutcome.completed
@@ -107,6 +108,7 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
             case "EjectConfirmed": event = .ejectCompleted
             case "MediaReturned": event = .mediaReturnedDuringCompletion
             case "PreflightFailed", "EjectFailed", "TrayOpenFailed": event = .failed
+            case "BurnSpeedUnavailable", "MediaWriteRejected": event = .preflightCapabilityRejected
             default: event = update.kind == .warning ? .waiting : .finishing
             }
         }
@@ -124,7 +126,7 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
     }
     func beginBurn(_ burn: DRBurn, layout: Any, kind: DiagnosticTaskKind,
                    model: DiagnosticDriveModel, media: DiagnosticMediaType,
-                   fileCount: Int, totalBytes: UInt64?, speedSelection: BurnSpeedSelection? = nil,
+                   fileCount: Int, totalBytes: UInt64?, speedSelection: BurnSpeedSelection,
                    preflight: LegacyMediaPreflight,
                    requireRecovery: @escaping @MainActor (String) -> Void = { _ in }) {
         guard !isBusy, let lease = coordinator.begin() else { return }
@@ -138,17 +140,19 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
         guard observeBackend(burn, name: .DRBurnStatusChanged) else { return }
         self.burn = burn
         legacyRequiresEject = burn.completionAction() == DRBurnCompletionActionEject
-        requestedSpeed = Double(burn.requestedBurnSpeed())
-        automaticSpeed = burn.requestedBurnSpeed() == DRDeviceBurnSpeedMax
+        let panelSpeed = burn.requestedBurnSpeed()
+        let panelLimit = panelSpeed == DRDeviceBurnSpeedMax ? nil : panelSpeed
+        requestedSpeed = nil; automaticSpeed = nil
         guard observeDevice(burn.device()) else { return }
         begin(panel: panel, notification: .DRBurnProgressPanelDidFinish, kind: kind,
-              model: model, media: media, fileCount: fileCount, totalBytes: totalBytes)
+              model: model, media: media, fileCount: fileCount, totalBytes: totalBytes,
+              reducedSpeedRequested: speedSelection == .reduced)
         let observedTaskID = taskID
         // The setup panel can outlive the selected media. Keep the lease while
         // validating the original medium and capabilities on a background thread.
         Task { @MainActor in
             do {
-                let speed = try await Task.detached { () throws -> Float? in
+                let speed = try await Task.detached { () throws -> Float in
                     try preflight.validate()
                     guard let device = burn.device(), device.isValid(), device.mediaIsPresent() else {
                         throw LegacyPreflightFailure.unavailableCapability
@@ -156,25 +160,21 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
                     guard device.ioRegistryEntryPath() == preflight.drivePath else {
                         throw LegacyPreflightFailure.changedDrive
                     }
-                    try preflight.validateBurnCapability(isBlank: device.mediaIsBlank(),
-                                                         isAppendable: device.mediaIsAppendable())
-                    if let speedSelection {
-                        guard device.mediaIsBlank() else { throw LegacyPreflightFailure.unavailableCapability }
-                        let supported = BurnSpeedOptions.values(fromStatus: device.status() as NSDictionary)
-                        try preflight.validate()
-                        return try speedSelection.requestedSpeed(supported: supported) ?? DRDeviceBurnSpeedMax
-                    }
+                    let status = device.status() as NSDictionary
+                    try preflight.validateBurnCapability(DiscWriteState.classify(status: status, driveInfo: device.info() as NSDictionary))
+                    let supported = BurnSpeedOptions.values(fromStatus: status)
                     try preflight.validate()
-                    return nil
+                    return try speedSelection.requestedSpeed(supported: supported, panelLimit: panelLimit) ?? DRDeviceBurnSpeedMax
                 }.value
                 guard self.taskID == observedTaskID, self.burn === burn, self.isBusy else { return }
-                if let speed {
-                    burn.setRequestedBurnSpeed(speed)
-                    guard burn.requestedBurnSpeed() == speed else { throw BurnSpeedUnavailable() }
-                }
+                burn.setRequestedBurnSpeed(speed)
+                guard burn.requestedBurnSpeed() == speed else { throw BurnSpeedUnavailable() }
+                requestedSpeed = Double(speed)
+                automaticSpeed = speed == DRDeviceBurnSpeedMax
                 if let taskID {
                     diagnostics.record(taskID: taskID, event: .deviceStatusObserved,
-                        evidence: DiagnosticEvidence(device: DiagnosticDeviceEvidence(identityConfirmed: true,
+                        evidence: DiagnosticEvidence(requestedSpeedKBps: requestedSpeed, requestedSpeedAutomatic: automaticSpeed,
+                            reducedSpeedRequested: speedSelection == .reduced, device: DiagnosticDeviceEvidence(identityConfirmed: true,
                             registryMediaPresent: true)))
                 }
                 DMBeginBurnPanel(panel, burn, layout)
@@ -228,11 +228,12 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
             switch error {
             case LegacyPreflightFailure.changedMedium, LegacyPreflightFailure.changedDrive:
                 event = .preflightIdentityRejected
-            case LegacyPreflightFailure.unavailableCapability, is BurnSpeedUnavailable:
+            case LegacyPreflightFailure.unavailableCapability, is BurnSpeedUnavailable, is DiscWriteRejected:
                 event = .preflightCapabilityRejected
             default: event = .preflightUnavailable
             }
-            diagnostics.record(taskID: taskID, event: event, error: error as NSError)
+            let evidence = (error as? DiscWriteRejected).map { DiagnosticEvidence(disc: DiagnosticDiscEvidence(writeState: $0.state)) }
+            diagnostics.record(taskID: taskID, event: event, error: error as NSError, evidence: evidence)
             diagnostics.finish(taskID: taskID, outcome: .failed)
         }
         message = error.localizedDescription
@@ -241,13 +242,15 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
         finishLease()
     }
     private func begin(panel: NSPanel, notification: Notification.Name, kind: DiagnosticTaskKind,
-                       model: DiagnosticDriveModel, media: DiagnosticMediaType, fileCount: Int, totalBytes: UInt64?) {
+                       model: DiagnosticDriveModel, media: DiagnosticMediaType, fileCount: Int, totalBytes: UInt64?,
+                       reducedSpeedRequested: Bool? = nil) {
         self.panel = panel
         isBusy = true; progress = SystemTaskProgress(); message = "正在准备系统任务…"
         failureDescription = nil; actualSpeedKBps = nil
         if let taskID {
             diagnostics.record(taskID: taskID, event: .preparing,
-                evidence: DiagnosticEvidence(requestedSpeedKBps: requestedSpeed, requestedSpeedAutomatic: automaticSpeed))
+                evidence: DiagnosticEvidence(requestedSpeedKBps: requestedSpeed, requestedSpeedAutomatic: automaticSpeed,
+                    reducedSpeedRequested: reducedSpeedRequested))
         }
         let observedTaskID = taskID
         panelObserver = NotificationCenter.default.addObserver(forName: notification, object: panel, queue: .main) { [weak self] _ in

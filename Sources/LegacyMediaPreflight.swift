@@ -48,9 +48,7 @@ struct LegacyMediaPreflight: Sendable {
         }
     }
 
-    func validateBurnCapability(isBlank: Bool, isAppendable: Bool) throws {
-        guard isBlank == wasBlank, isBlank || isAppendable else {
-            throw LegacyPreflightFailure.unavailableCapability
-        }
+    func validateBurnCapability(_ state: DiscWriteState) throws {
+        try state.require(wasBlank ? .blankCandidate : .appendCandidate)
     }
 }

@@ -32,6 +32,10 @@ enum DeviceChangeObserverTests {
         precondition(gate.consume(), "Media-node changes refresh after transition")
         gate.statusChanged("drive", snapshot: state(speeds: [5540]))
         precondition(gate.consume(), "Late arriving capability data refreshes speed choices")
+        var full = state(speeds: [5540])
+        full.freeBlocks = 0
+        gate.statusChanged("drive", snapshot: full)
+        precondition(gate.consume(), "Losing free space must invalidate a previous write status")
         gate.statusChanged("drive", snapshot: state(busy: true))
         gate.disappeared("drive")
         precondition(gate.consume(), "Disconnected busy device cannot permanently block inventory")

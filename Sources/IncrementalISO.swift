@@ -44,22 +44,38 @@ struct PreparedIncrementalISO: Sendable {
 /// recursive directory records then reference old absolute extents. Neither
 /// old source files nor old payload are needed during standard preparation.
 enum IncrementalISO {
+    static let sessionReserveBlocks: UInt64 = 16_384
+    static func hasSpaceForSession(_ freeBlocks: UInt32) -> Bool {
+        UInt64(freeBlocks) > sessionReserveBlocks + 1
+    }
     static func validateCapacity(imageBytes: UInt64, freeBlocks: UInt32, start: UInt32) throws {
         guard imageBytes > 0, imageBytes < UInt64(UInt32.max), imageBytes % 2048 == 0,
-              imageBytes / 2048 + 16384 < UInt64(freeBlocks),
+              imageBytes / 2048 + sessionReserveBlocks < UInt64(freeBlocks),
               imageBytes / 2048 + UInt64(start) <= UInt64(UInt32.max) else {
             throw AppendPreflightFailure(.capacity, "镜像与 32 MiB 会话收尾预留超出可追加空间，或镜像超出 4 GiB/地址限制。请减少新增内容。")
         }
     }
 
+    static func validateTarget(_ snapshot: SessionSnapshot, imageBytes: UInt64) throws {
+        if let track = snapshot.reservedTrack {
+            guard imageBytes > 0, imageBytes < UInt64(UInt32.max), imageBytes % 2048 == 0,
+                  (imageBytes + 32767) / 32768 * 16 <= UInt64(track.blocks) else {
+                throw AppendPreflightFailure(.capacity, "镜像超出预留轨道容量。")
+            }
+        } else {
+            guard let target = snapshot.writable, let start = target.nextWritable else { throw DiscFailure("没有可写轨道。") }
+            try validateCapacity(imageBytes: imageBytes, freeBlocks: target.freeBlocks, start: start)
+        }
+    }
+
     static func build(snapshot: SessionSnapshot, verified: [VerifiedFile], sources: [URL], directory: URL) throws -> PreparedIncrementalISO {
-        let oldFiles = snapshot.fileEntries, oldDirectories = snapshot.directoryPaths
-        guard snapshot.appendable, snapshot.volume.joliet, let writable = snapshot.writable,
+        let oldFiles = snapshot.bridge?.files ?? snapshot.fileEntries, oldDirectories = snapshot.directoryPaths
+        guard snapshot.appendState == .appendReady, let writable = snapshot.writable,
               let start = writable.nextWritable, writable.freeBlocks > 0, !sources.isEmpty,
               (snapshot.recordedEntries != nil || snapshot.rootEntries.allSatisfy { !$0.directory }),
               snapshot.tracks.filter({ !$0.blank }).allSatisfy({ !$0.damaged && UInt64($0.start) + UInt64($0.blocks) <= start }),
               UInt64(start) + UInt64(writable.freeBlocks) <= snapshot.identity.bytes / 2048 else {
-            throw AppendPreflightFailure(.invalidTree, "需要可追加的 ISO/Joliet 光盘及完整目录信息，请重新识别光盘。")
+            throw AppendPreflightFailure(.invalidTree, "需要可追加的 ISO 9660 数据盘及完整目录信息，请重新识别光盘。")
         }
         guard verified.isEmpty || (verified.count == oldFiles.count && Set(verified.map(\.path)) == Set(oldFiles.map(\.name))) else {
             throw AppendPreflightFailure(.invalidTree, "旧文件校验依据与目录不一致。")
@@ -78,7 +94,16 @@ enum IncrementalISO {
                 }
             }
         }
-        let sourceTree = try AppendSourceTree.inspect(sources, existing: snapshot.treeEntries)
+        let sourceTree = try AppendSourceTree.inspect(sources, existing: snapshot.bridge?.files ?? snapshot.treeEntries)
+        if snapshot.udf != nil, sourceTree.files.contains(where: { !(1..<0x4000_0000).contains($0.bytes) }) {
+            throw AppendPreflightFailure(.unsupportedSource, "UDF 追加目前支持非空且小于 1 GiB 的普通文件。")
+        }
+        if snapshot.bridge != nil {
+            guard sourceTree.directories.isEmpty, oldFiles.count + sourceTree.files.count <= 32,
+                  sourceTree.files.allSatisfy({ (1..<0x4000_0000).contains($0.bytes) }) else {
+                throw AppendPreflightFailure(.unsupportedSource, "混合盘追加目前支持根目录普通文件，合计最多 32 个，每个新增文件须大于零且小于 1 GiB。")
+            }
+        }
         let directories = Set(oldDirectories + sourceTree.directories).sorted()
         guard !sourceTree.files.isEmpty || directories.count > oldDirectories.count else {
             throw AppendPreflightFailure(.conflict, "所选目录没有新增内容，无需追加。")
@@ -104,14 +129,30 @@ enum IncrementalISO {
         }
         try sourceTree.validateUnchanged()
         let image = directory.appendingPathComponent("append.iso")
-        try makeHybrid(staging, image: image, log: directory.appendingPathComponent("hdiutil.log"))
+        try makeHybrid(staging, image: image, log: directory.appendingPathComponent("hdiutil.log"),
+                       bridge: snapshot.bridge, udf: snapshot.udf)
         let bytes = (try fm.attributesOfItem(atPath: image.path)[.size] as! NSNumber).uint64Value
-        try validateCapacity(imageBytes: bytes, freeBlocks: writable.freeBlocks, start: start)
-        try relocate(image, start: start, old: oldFiles, new: newProofs, directories: directories, bytes: bytes)
+        try validateTarget(snapshot, imageBytes: bytes)
+        if let udf = snapshot.udf {
+            try PureUDFSession.relocate(image: image, bytes: bytes, start: start, udf: udf,
+                                        old: oldFiles, added: newProofs, directories: directories)
+        } else {
+            try relocate(image, start: start, old: oldFiles, new: newProofs, directories: directories, bytes: bytes,
+                         preservedPrimaryDirectories: snapshot.volume?.joliet == true || snapshot.bridge != nil ? nil : oldDirectories, bridge: snapshot.bridge)
+        }
         var proof = AppendProof(previousSession: snapshot.latest.session, expectedStart: start,
             files: verified.map { FileProof(path: $0.path, bytes: UInt64($0.bytes), sha256: $0.sha256) } + newProofs,
             directories: directories.isEmpty ? nil : directories)
         if verified.isEmpty { proof.preserved = oldFiles.map { PreservedFile(path: $0.name, bytes: $0.bytes, lba: $0.lba) } }
+        if snapshot.udf != nil { proof.udfLabel = snapshot.udf?.label }
+        if let bridge = snapshot.bridge {
+            var ids: [String: Data] = [:]
+            for file in bridge.files {
+                guard let id = bridge.primaryIDs[file.lba] else { throw DiscFailure("缺少原有 ISO 文件名。") }
+                ids[file.name] = id
+            }
+            proof.bridgePrimaryIDs = ids
+        }
         try proof.validateStructure()
         let imageProof = try FileProof.capture(image)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -126,11 +167,18 @@ enum IncrementalISO {
             sourceTree: sourceTree, preservedDirectoryPaths: oldDirectories)
     }
 
-    private static func makeHybrid(_ source: URL, image: URL, log: URL) throws {
+    private static func makeHybrid(_ source: URL, image: URL, log: URL, bridge: BridgeSession?, udf: UDFVolumeProbe?) throws {
         try Data().write(to: log, options: .withoutOverwriting)
         let output = try FileHandle(forWritingTo: log); defer { try? output.close() }
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-        process.arguments = ["makehybrid", "-iso", "-joliet", "-default-volume-name", "DISCMATE", "-o", image.path, source.path]
+        var arguments = ["makehybrid", "-iso", "-joliet"]
+        if let label = udf?.label {
+            arguments = ["makehybrid", "-udf", "-udf-version", "1.02", "-udf-volume-name", label]
+        } else if let bridge {
+            arguments += ["-udf", "-udf-version", "1.02", "-iso-volume-name", bridge.isoLabel,
+                          "-joliet-volume-name", bridge.udfLabel, "-udf-volume-name", bridge.udfLabel]
+        } else { arguments += ["-default-volume-name", "DISCMATE"] }
+        process.arguments = arguments + ["-o", image.path, source.path]
         process.standardOutput = output; process.standardError = output
         try process.run()
         // Local-files-only process. Termination on timeout is never applied to a
@@ -162,7 +210,8 @@ enum IncrementalISO {
         let entries: [ISOEntry]
     }
 
-    private static func relocate(_ image: URL, start: UInt32, old: [ISOEntry], new: [FileProof], directories: [String], bytes: UInt64) throws {
+    private static func relocate(_ image: URL, start: UInt32, old: [ISOEntry], new: [FileProof], directories: [String],
+                                 bytes: UInt64, preservedPrimaryDirectories: [String]?, bridge: BridgeSession?) throws {
         let file = try FileHandle(forUpdating: image); defer { try? file.close() }
         func read(_ lba: UInt32, _ count: UInt32) throws -> Data {
             guard count <= 1024 * 1024, UInt64(lba) * 2048 + UInt64(count) <= bytes else { throw DiscFailure("本地 ISO 元数据越界。") }
@@ -224,7 +273,21 @@ enum IncrementalISO {
             guard UInt64(lba) * 2048 + UInt64(data.count) <= bytes, patches[lba] == nil else { throw DiscFailure("ISO 元数据区段重复或越界。") }
             patches[lba] = data
         }
+        if let bridge {
+            try HybridUDF.relocate(start: start, blocks: UInt32(bytes / 2048), partitionStart: bridge.partitionStart,
+                                   references: references, read: { try read($0, 2048) }, patch: patch)
+        }
         for var tree in trees {
+            if !tree.volume.joliet, let preservedPrimaryDirectories {
+                // hdiutil can give two names the same shortened ISO alias.
+                // Every old path must still identify its own placeholder in
+                // the primary namespace, even if the Joliet names are fine.
+                let primaryDirectories = Set(tree.entries.filter(\.directory).map(\.name))
+                let matchingFiles = tree.entries.filter { !$0.directory && references[$0.lba]?.name == $0.name }
+                guard matchingFiles.count == old.count, primaryDirectories.isSuperset(of: preservedPrimaryDirectories) else {
+                    throw AppendPreflightFailure(.invalidName, "新目录会改变已有 ISO 文件或目录的名称，请调整与旧名称冲突的新增项目。")
+                }
+            }
             var foundReferences = Set<UInt32>()
             for node in tree.nodes {
                 var relocated: [Data] = [], special = Set<String>()
@@ -239,6 +302,12 @@ enum IncrementalISO {
                               special.insert(entry.name).inserted else { throw DiscFailure("ISO 自目录或父目录记录不一致。") }
                         putBoth32(&record, 2, try shifted(entry.lba))
                     } else if !entry.directory, let reference = references[entry.lba] {
+                        if !tree.volume.joliet, let id = bridge?.primaryIDs[reference.lba] {
+                            record = Data(record.prefix(33)) + id
+                            if id.count.isMultiple(of: 2) { record.append(0) }
+                            record[0] = UInt8(record.count)
+                            record[32] = UInt8(id.count)
+                        }
                         putBoth32(&record, 2, reference.lba); putBoth32(&record, 10, reference.bytes)
                         guard foundReferences.insert(entry.lba).inserted else { throw DiscFailure("旧文件引用重复。") }
                     } else {
@@ -248,6 +317,12 @@ enum IncrementalISO {
                     relocated.append(record)
                 }
                 guard special == Set([".", ".."]) else { throw DiscFailure("目录缺少自目录或父目录记录。") }
+                if !tree.volume.joliet, bridge != nil {
+                    func identifier(_ record: Data) -> Data { Data(record[33..<(33 + Int(record[32]))]) }
+                    relocated.sort { identifier($0).lexicographicallyPrecedes(identifier($1)) }
+                    let names = try relocated.map { try ISO9660.record($0, joliet: false).name }
+                    guard Set(names).count == names.count else { throw AppendPreflightFailure(.conflict, "新增文件的 ISO 短名称与已有文件冲突。") }
+                }
                 try patch(node.entry.lba, pack(relocated, bytes: Int(node.entry.bytes)))
             }
             guard foundReferences == Set(references.keys) else { throw DiscFailure("ISO/Joliet 旧文件引用不一致。") }
@@ -311,6 +386,21 @@ enum IncrementalISO {
         }
         for reference in old {
             guard entries.first(where: { $0.name == reference.name }) == reference else { throw DiscFailure("增量镜像未保留旧文件区段。") }
+        }
+        if let bridge {
+            func readSession(_ lba: UInt32) throws -> Data {
+                guard lba >= start else { throw DiscFailure("新 UDF 目录意外引用旧元数据。") }
+                return try read(lba - start, 2048)
+            }
+            let volume = try UDFVolumeProbe.inspect(sessionStart: start, capacityBlocks: UInt64(start) + bytes / 2048,
+                                                    allowISOBridge: true, readSector: readSession)
+            let udf = try UDFDirectoryReader.entries(volume: volume, capacityBlocks: UInt64(start) + bytes / 2048,
+                                                     readSector: readSession)
+            guard volume.partitionStart == bridge.partitionStart, volume.label == bridge.udfLabel,
+                  udf.count == entries.count, udf.allSatisfy({ item in entries.contains {
+                      !$0.directory && $0.name == item.path && $0.bytes == item.bytes &&
+                      item.extents == [.init(lba: $0.lba, bytes: $0.bytes)]
+                  } }) else { throw DiscFailure("UDF 和 Joliet 的文件名、长度或数据位置不一致。") }
         }
         for expected in new {
             guard let entry = entries.first(where: { $0.name == expected.path }), !entry.directory, entry.lba >= start,

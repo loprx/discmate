@@ -6,8 +6,11 @@ struct SessionPane: View {
     let bsd: String?
     let otherTaskBusy: Bool
     let drivePath: String?
+    let writeState: DiscWriteState
     let recordedMedia: Bool
     @State private var showingAppendFailure = false
+
+    @State private var closeTarget: ManualSessionClose?
 
     private var locked: Bool { model.blocksDeviceOperations || otherTaskBusy }
 
@@ -23,29 +26,37 @@ struct SessionPane: View {
                     if let snapshot = model.snapshot {
                         Text("盘上根目录 \(snapshot.rootEntries.count) 项 · 共 \(snapshot.fileEntries.count) 个文件、\(snapshot.directoryPaths.count) 个目录")
                         Spacer()
-                        if let writable = snapshot.writable, snapshot.appendable {
+                        if writeState == .appendReady, let writable = snapshot.writable {
                             Text("可用约 \(OperationEstimate.size(UInt64(writable.freeBlocks) * 2048))")
                         } else if snapshot.incompleteSession {
                             Text("第 \(snapshot.latest.session) 会话未封闭；暂停追加（不代表盘片报废）")
                                 .foregroundStyle(.orange)
-                        } else { Text("当前状态不支持追加").foregroundStyle(.orange) }
+                        } else { Text(writeState.title).foregroundStyle(.secondary) }
                     } else {
                         Text("盘上文件：等待识别光盘")
                         Spacer()
                         Text("剩余空间待识别").foregroundStyle(.secondary)
                     }
                 }.font(.callout)
+                if model.snapshot?.bridge != nil {
+                    Text("已核对 ISO 和 UDF 目录，列表显示完整的 UDF 文件名。追加保留原 ISO 名称和文件位置。")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if model.snapshot?.hasUDFRecognition == true {
+                    Text("下方显示 ISO 目录。UDF 目录中的文件名和内容列表可能不同。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 FloatingScrollView {
                     if let snapshot = model.snapshot {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(Array(snapshot.rootEntries.enumerated()), id: \.offset) { item in
                                 let entry = item.element
+                                let displayName = snapshot.bridge?.files.first(where: { $0.lba == entry.lba })?.name ?? entry.name
                                 HStack(spacing: 10) {
                                     Image(systemName: entry.directory ? "folder" : "doc")
                                         .foregroundStyle(.secondary)
                                         .frame(width: 18)
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(entry.name).lineLimit(1).help(entry.name)
+                                        Text(displayName).lineLimit(1).help(displayName)
                                         Text(recordedMetadata(entry, in: snapshot))
                                             .font(.caption).foregroundStyle(.secondary)
                                     }
@@ -70,11 +81,19 @@ struct SessionPane: View {
                 }
 
                 HStack {
-                    Button(model.unsupportedFilesystem == nil ? "在访达打开最新内容" : "在访达打开当前 UDF 光盘") { model.openLatest(bsd: bsd) }
+                    if let snapshot = model.snapshot, snapshot.incompleteSession, snapshot.reservedTrack == nil,
+                       let drivePath, snapshot.identity.bsd == bsd {
+                        Button("手动关闭会话…") {
+                            closeTarget = ManualSessionClose(snapshot: snapshot, drivePath: drivePath)
+                        }
+                        .disabled(locked || writeState != .incompleteSession)
+                        .help("写入末次会话的结束信息，通常需要数分钟。请保持光驱连接，完成后重新识别目录。")
+                    }
+                    Button(model.unsupportedFilesystem == nil && model.snapshot?.udf == nil ? "在访达打开最新内容" : "在访达打开当前 UDF 光盘") { model.openLatest(bsd: bsd) }
                         .disabled(locked || !recordedMedia || (model.snapshot == nil && bsd == nil) || model.snapshot?.incompleteSession == true)
                         .help(model.snapshot?.incompleteSession == true
                               ? "末次会话未封闭，不能正常挂载；可使用只读校验读取已记录文件。"
-                              : model.unsupportedFilesystem != nil
+                              : model.unsupportedFilesystem != nil || model.snapshot?.udf != nil
                               ? "只读打开 macOS 当前已挂载的 UDF 光盘；不选择其他会话、不写盘，也不校验文件正文。"
                               : "只读挂载最新会话，可能需要 macOS 管理员授权；通常数秒，系统忙时可能更久。不会逐个读取或校验文件。请等待打开完成后再推出。")
                 }
@@ -126,18 +145,35 @@ struct SessionPane: View {
                                 .disabled(locked || model.mountedURL == nil)
                                 .help("在访达显示已确认的挂载目录，通常立即完成；不重新挂载、不校验。")
                         }
-                        Text(model.snapshot.map { "DVD+R · ISO\($0.volume.joliet ? "/Joliet" : "") · 最新会话 \($0.latest.session)" }
+                        Text(model.snapshot.map { "DVD+R · \($0.filesystemLabel) · 最新会话 \($0.latest.session)" }
                              ?? (model.unsupportedFilesystem == .udf102 ? "DVD+R · UDF 1.02 · 追加待支持" : "盘型与会话待识别"))
                             .font(.caption).foregroundStyle(.secondary)
                     }.padding(.top, 8)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
         }
+        .sheet(item: $closeTarget) { target in
+            VStack(alignment: .leading, spacing: 14) {
+                Text("关闭第 \(target.snapshot.latest.session) 个会话？").font(.headline)
+                Text("这张 DVD+R 的最新目录有 \(target.snapshot.rootEntries.count) 项。关闭会话会永久写入结束信息，已有文件的完整性需另行读回校验。")
+                Text("操作通常需要数分钟。期间请保持光驱连接，不要退出软件。完成后可重新检查剩余空间及追加能力。")
+                HStack {
+                    Spacer()
+                    Button("取消") { closeTarget = nil }.keyboardShortcut(.cancelAction)
+                    Button("确认关闭会话", role: .destructive) {
+                        closeTarget = nil
+                        model.closeSession(target)
+                    }
+                    .disabled(locked || model.snapshot?.identity != target.snapshot.identity ||
+                              bsd != target.snapshot.identity.bsd || drivePath != target.drivePath)
+                }
+            }.padding(20).frame(width: 400)
+        }
         .onChange(of: model.appendPreparationFailure) { showingAppendFailure = $0 != nil }
         .alert("无法准备追加", isPresented: $showingAppendFailure) {
             Button("知道了", role: .cancel) {}
         } message: {
-            Text("\(model.appendPreparationFailure ?? "")\n\n本次没有写入光盘。请调整待刻录列表后重新查看摘要。")
+            Text("\(model.appendPreparationFailure ?? "")\n\n本次没有写入光盘。")
         }
     }
 

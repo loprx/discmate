@@ -73,6 +73,17 @@ final class SessionMountService {
         try checkSystem(dm_udf_mount_matches(path.path, identity.bsd), "确认 UDF 只读挂载来源")
         return path
     }
+    func unmountForSessionClose(_ identity: MediaIdentity) async throws {
+        let whole = try disk(identity)
+        do {
+            try await normalUnmount(whole, options: DADiskUnmountOptions(kDADiskUnmountOptionWhole))
+        } catch let error as NSError where error.domain == NSOSStatusErrorDomain &&
+            UInt32(truncatingIfNeeded: error.code) == UInt32(truncatingIfNeeded: kDAReturnNotMounted) {
+            // The whole-disc request also covers children. Already unmounted is sufficient.
+        }
+        try identity.validate()
+    }
+
     func unmount(_ snapshot: SessionSnapshot) async throws {
         let disk = try disk(snapshot.identity)
         let description = DADiskCopyDescription(disk) as? [String: Any]
@@ -80,12 +91,16 @@ final class SessionMountService {
             throw DiscFailure("系统没有将这张光盘识别为 ISO 文件系统。")
         }
         if description?[kDADiskDescriptionVolumePathKey as String] != nil {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                let box = Unmanaged.passRetained(MountCallback(continuation)).toOpaque()
-                DADiskUnmount(disk, DADiskUnmountOptions(kDADiskUnmountOptionDefault), Self.callback, box)
-            }
+            try await normalUnmount(disk, options: DADiskUnmountOptions(kDADiskUnmountOptionDefault))
         }
         try snapshot.identity.validate()
+    }
+
+    private func normalUnmount(_ disk: DADisk, options: DADiskUnmountOptions) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let box = Unmanaged.passRetained(MountCallback(continuation)).toOpaque()
+            DADiskUnmount(disk, options, Self.callback, box)
+        }
     }
     // The callback owns its context until Disk Arbitration actually completes.
     // A UI warning timer must not free it or start another hardware operation.

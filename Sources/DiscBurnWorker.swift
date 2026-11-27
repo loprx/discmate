@@ -125,6 +125,16 @@ private final class DiscBurnWorker: NSObject {
         // we're waiting for device release/ejection later.
         do { try autoreleasepool { try begin() } }
         catch {
+            if let rejection = error as? DiscWriteRejected {
+                emit(.warning, state: "MediaWriteRejected", detail: rejection.localizedDescription,
+                    evidence: DiagnosticEvidence(disc: DiagnosticDiscEvidence(writeState: rejection.state)))
+                return .finished(.failed(rejection.localizedDescription, recoveryRequired: started), nil)
+            }
+            if error is BurnSpeedUnavailable {
+                emit(.warning, state: "BurnSpeedUnavailable", detail: error.localizedDescription,
+                     evidence: DiagnosticEvidence(reducedSpeedRequested: job.speed == .reduced))
+                return .finished(.failed(error.localizedDescription, recoveryRequired: started), nil)
+            }
             let appendRejection: (error: NSError, evidence: DiagnosticEvidence)?
             if case .append = job, !started { appendRejection = AppendDiagnostics.rejection(error) }
             else { appendRejection = nil }
@@ -163,9 +173,10 @@ private final class DiscBurnWorker: NSObject {
             defer { reader.close() }
             fresh = try reader.scan()
         }
+        try fresh.appendState.require(.appendReady)
         guard fresh.latest == prepared.snapshot.latest, fresh.descriptorHash == prepared.snapshot.descriptorHash,
               fresh.treeEntries == prepared.snapshot.treeEntries,
-              fresh.appendable, fresh.writable?.nextWritable == prepared.proof.expectedStart else {
+              fresh.reservedTrack == nil, fresh.appendable, fresh.writable?.nextWritable == prepared.proof.expectedStart else {
             throw LegacyPreflightFailure.changedMedium
         }
         originalMediaID = fresh.identity.registryID
@@ -178,8 +189,8 @@ private final class DiscBurnWorker: NSObject {
         try checkSystem(dm_registry_identity(devicePath, &deviceRegistryID), "记录刻录设备身份")
         let status = device.status() as NSDictionary
         let media = status[DRDeviceMediaInfoKey] as? NSDictionary
+        try DiscWriteState.classify(status: status, driveInfo: device.info() as NSDictionary).require(.appendCandidate)
         guard media?[DRDeviceMediaBSDNameKey] as? String == fresh.identity.bsd,
-              device.mediaIsPresent(), device.mediaIsAppendable(), !device.mediaIsBlank(),
               let burn = DRBurn(for: device) else {
             throw DiscFailure("目标光驱或盘片不符合追加测试条件。")
         }
@@ -206,7 +217,7 @@ private final class DiscBurnWorker: NSObject {
         let requestedSpeed = try prepared.speed.requestedSpeed(supported: supportedSpeeds) ?? DRDeviceBurnSpeedMax
         burn.setRequestedBurnSpeed(requestedSpeed)
         guard burn.requestedBurnSpeed() == requestedSpeed else {
-            throw DiscFailure("系统未接受所选刻录速率，未开始刻录。")
+            throw BurnSpeedUnavailable()
         }
         burn.setCompletionAction(DRBurnCompletionActionEject)
         guard burn.appendable(), burn.verifyDisc() == prepared.verifyAfterWrite,
@@ -214,7 +225,9 @@ private final class DiscBurnWorker: NSObject {
             throw DiscFailure("系统未接受追加、校验或弹出设置。")
         }
         emit(.device, state: "PreflightValidated", detail: "追加刻录设置已复核。",
-             evidence: DiagnosticEvidence(verifyAfterWriteAccepted: burn.verifyDisc()))
+             evidence: DiagnosticEvidence(requestedSpeedKBps: Double(requestedSpeed),
+                 requestedSpeedAutomatic: prepared.speed == .automatic, reducedSpeedRequested: prepared.speed == .reduced,
+                 verifyAfterWriteAccepted: burn.verifyDisc()))
         try observeAndWrite(burn, device: device, track: track) {
             if let plan = prepared.sourceValidation {
                 // Recheck original sources after image verification and device
@@ -235,8 +248,8 @@ private final class DiscBurnWorker: NSObject {
         originalMediaID = request.mediaID
         let status = device.status() as NSDictionary
         let media = status[DRDeviceMediaInfoKey] as? NSDictionary
-        guard (status[DRDeviceIsBusyKey] as? NSNumber)?.boolValue == false,
-              device.mediaIsPresent(), device.mediaIsBlank(), device.mediaType() == DRDeviceMediaTypeDVDPlusR,
+        try DiscWriteState.classify(status: status, driveInfo: device.info() as NSDictionary).require(.blankCandidate)
+        guard media?[DRDeviceMediaTypeKey] as? String == DRDeviceMediaTypeDVDPlusR,
               media?[DRDeviceMediaBSDNameKey] as? String == request.bsd,
               let burn = DRBurn(for: device) else { throw DiscFailure("首次数据刻录需要空闲光驱中的空白 DVD+R；未开始写入。") }
         let track = try request.makeTrack()
@@ -253,12 +266,13 @@ private final class DiscBurnWorker: NSObject {
         let speed = try request.speed.requestedSpeed(supported: BurnSpeedOptions.values(fromStatus: status)) ?? DRDeviceBurnSpeedMax
         burn.setRequestedBurnSpeed(speed)
         burn.setCompletionAction(DRBurnCompletionActionEject)
+        guard burn.requestedBurnSpeed() == speed else { throw BurnSpeedUnavailable() }
         guard burn.appendable() == request.appendable, burn.verifyDisc() == request.verifyAfterWrite,
-              burn.requestedBurnSpeed() == speed,
               burn.completionAction() == DRBurnCompletionActionEject else { throw DiscFailure("系统未接受刻录设置，未开始写入。") }
         emit(.device, state: "PreflightValidated", detail: "空白盘身份和刻录设置已复核。",
              evidence: DiagnosticEvidence(requestedSpeedKBps: Double(speed),
                  requestedSpeedAutomatic: request.speed == .automatic,
+                 reducedSpeedRequested: request.speed == .reduced,
                  verifyAfterWriteAccepted: burn.verifyDisc()))
         try observeAndWrite(burn, device: device, track: track, validate: request.validateIdentity)
     }
@@ -427,7 +441,7 @@ extension TestAppendService {
 enum DiscBurnService {
     @MainActor
     static func burn(snapshot: SessionSnapshot, proof: AppendProof, source: BurnSource,
-                     speed: BurnSpeedSelection = .automatic, verifyAfterWrite: Bool = false,
+                     speed: BurnSpeedSelection = .reduced, verifyAfterWrite: Bool = false,
                      sourceValidation: PreparedIncrementalISO? = nil,
                      progress: (BurnProgress) -> Void) async throws {
         try await consume(DiscBurnWorker.stream(.append(BurnInput(snapshot: snapshot, proof: proof, source: source,
