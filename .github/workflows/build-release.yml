@@ -1,0 +1,130 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-ci.[0-9]+'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and package (arm64)
+    runs-on: macos-15
+    timeout-minutes: 30
+    outputs:
+      artifact: ${{ steps.package.outputs.artifact }}
+      archive: ${{ steps.package.outputs.archive }}
+      checksum: ${{ steps.package.outputs.checksum }}
+      commit: ${{ steps.package.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record build environment
+        run: |
+          test "$(uname -m)" = arm64
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          git rev-parse HEAD
+
+      - name: Verify the tagged commit is on main
+        run: |
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo 'The tagged commit must be on main' >&2
+            exit 1
+          fi
+
+      - name: Run offline tests
+        run: zsh test.sh
+
+      - name: Build and verify ZIP
+        id: package
+        shell: zsh -euo pipefail {0}
+        run: |
+          release_tag=${GITHUB_REF_NAME%%-ci.*}
+          DISCMATE_VERSION="${release_tag#v}" DISCMATE_BUILD_NUMBER="$GITHUB_RUN_ID" zsh build.sh
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/DiscMate.app/Contents/Info.plist)
+          build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/DiscMate.app/Contents/Info.plist)
+          if [[ "$release_tag" != "v$version" || "$GITHUB_RUN_ID" != "$build" ]]; then
+            print -u2 "Unexpected bundle version or build: $version ($build), tag $GITHUB_REF_NAME, run $GITHUB_RUN_ID"
+            exit 1
+          fi
+          zsh release/package.sh
+          archive="DiscMate-v$version-macos-arm64.zip"
+          checksum=$(shasum -a 256 "dist/$archive" | awk '{print $1}')
+          {
+            print "artifact=DiscMate-arm64-$GITHUB_RUN_ATTEMPT"
+            print "archive=$archive"
+            print "checksum=$checksum"
+            print "commit=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate cask preview
+        if: contains(github.ref_name, '-ci.')
+        env:
+          BUILD_ARCHIVE: ${{ steps.package.outputs.archive }}
+          BUILD_CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: |
+          cask=dist/tap/Casks/discmate.rb
+          zsh release/render-cask.sh "$GITHUB_REPOSITORY_OWNER" "dist/$BUILD_ARCHIVE" "$cask"
+          ruby -c "$cask"
+          grep -Fx "  sha256 \"$BUILD_CHECKSUM\"" "$cask"
+
+      - name: Upload verified ZIP
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.package.outputs.artifact }}
+          path: dist/${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    name: Publish GitHub Release and Homebrew cask
+    if: github.repository == 'loprx/discmate' && !contains(github.ref_name, '-ci.')
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 15
+    concurrency:
+      group: discmate-publish
+      queue: max
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          persist-credentials: false
+
+      - name: Download verified ZIP
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: ${{ runner.temp }}/discmate-build
+
+      - name: Publish and verify GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_ARCHIVE: ${{ needs.build.outputs.archive }}
+          BUILD_CHECKSUM: ${{ needs.build.outputs.checksum }}
+          BUILD_COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          zsh release/publish-github.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$BUILD_COMMIT" \
+            "$RUNNER_TEMP/discmate-build/$BUILD_ARCHIVE" "$BUILD_CHECKSUM" "$RUNNER_TEMP/discmate-published"
+
+      - name: Render Homebrew cask from published ZIP
+        env:
+          BUILD_ARCHIVE: ${{ needs.build.outputs.archive }}
+        run: |
+          zsh release/render-cask.sh "$GITHUB_REPOSITORY_OWNER" \
+            "$RUNNER_TEMP/discmate-published/$BUILD_ARCHIVE" "$RUNNER_TEMP/discmate-published/discmate.rb"
+
+      - name: Update Homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: zsh release/update-tap.sh loprx/homebrew-tap "$RUNNER_TEMP/discmate-published/discmate.rb"
