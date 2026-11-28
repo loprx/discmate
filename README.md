@@ -1,154 +1,70 @@
 # DiscMate
 
-DiscMate 是面向 Apple Silicon Mac 的免费光盘刻录工具。核心功能是在仍可追加的数据 DVD+R 上加入新文件，让新旧文件都能从最新会话读取。当前稳定版为 0.5.1，适用于 Apple Silicon Mac。
+**English** · [简体中文](README.zh-CN.md)
 
-## 安装与更新
+DiscMate is a free optical disc burner for Apple Silicon Macs. Use it to burn a blank data DVD+R or add files and folders to an appendable disc. Each new session writes the new files and an updated directory. Existing files keep their original locations on the disc.
 
-需要 Apple Silicon、macOS 13 或更新版本，以及外接或内置刻录机。通过本项目自己的 [Homebrew tap](https://github.com/loprx/homebrew-tap) 安装：
+## Can I append to my disc?
+
+**Three DVD+R filesystem layouts have passed physical append and readback tests.** The layout describes how the disc stores its directory. Photos, ZIP archives and documents can all be burned as ordinary files.
+
+| Existing DVD+R layout | What you can add | Physical test results |
+| --- | --- | --- |
+| ISO 9660 with Joliet | Files and folders, including nested folders, Chinese names and empty directories. Each new file and the new session image must be under 4 GiB. | Across multiple appends, file hashes matched after readback and existing files kept their original locations. |
+| Hybrid ISO / UDF 1.02 | Files in the root directory, up to 32 files in total. Each new file must be nonempty and under 1 GiB. The UDF root directory must fit in one sector. | After reinsertion, both directories were checked for filenames and the old and new files were read back and verified by hash. |
+| Pure UDF 1.02, single physical partition | Files and directories. Each existing file must occupy one contiguous extent. Each new file must be nonempty and under 1 GiB. | One photo was added to a disc containing 89 files. After reinsertion, all 90 file hashes matched. |
+
+**Layouts still awaiting physical append verification**
+
+- **UDF 2.01 with a virtual allocation table (VAT).** Five existing files were read from a physical DVD+R. A new file has been added only to an offline test image. Writing, finalizing, ejecting and verifying the old and new files after reinsertion remain untested on this layout.
+- **ISO 9660 with only a primary directory.** Files were extracted from an offline multisession image and their hashes matched. A physical append and readback remain unverified.
+
+CDs, other DVD media and Blu-ray discs have yet to pass equivalent append tests. The disc must allow another session and have enough free space. DiscMate checks the session, directory and available space when you review the burn summary.
+
+## Burn, append and verify
+
+1. **Add files.** In the data disc view (数据光盘), select files or folders, drag them from Finder, or paste them with ⌘V. Pasting plain text creates a TXT file of up to 1 MiB.
+2. **Review the burn summary** (查看刻录摘要). For a blank disc, leave multisession enabled if you plan to add files later. For an existing disc, select only the new items. DiscMate reads the old directory and file locations, so preparing an append does not require reading all the old file contents. Folders at the same path can merge. Existing files cannot be overwritten.
+3. **Confirm and burn.** System verification after writing is optional and off by default. Keep the drive connected and powered through writing and finalization. If the final drive state is unclear, use the device recheck action (重新检查设备).
+4. **Reinsert the disc and check the files.** If Finder shows an earlier session, choose 在访达打开最新内容 and authorize a read-only mount. Readback verification (读回校验) can check just the new files or read the whole disc. Files with a source manifest can be verified against their SHA-256 hashes.
+
+## Other features
+
+- Create audio CDs, burn disc images or existing VIDEO_TS folders, erase rewritable media, and inspect disc information.
+- Manually close a recognized unfinished DVD+R session or write to an eligible blank reserved track. Closing a reserved track consumes its full capacity. The burn summary shows the space required before you confirm.
+- Choose a burn speed and follow the current stage and elapsed time. If a task fails, preview or export its redacted diagnostic report to check drive state, USB errors and finalization events.
+
+## Install and update
+
+Requires an Apple Silicon Mac running macOS 13 or later and a burner compatible with your media.
 
 ```sh
 brew install --cask loprx/tap/discmate
 ```
 
-在「DiscMate → 设置 → 软件更新」可查看版本和构建号，手动检查 GitHub 正式发布版本，并打开新版发布页。检查结果与错误码可在脱敏诊断报告中查看。
-可按 ⌘O 打开刻录页面的文件选择器，按 Esc 或 ⌘W 关闭设置窗口。
-
-
-更新已安装版本：
+To update an existing installation, run
 
 ```sh
 brew update
 brew upgrade --cask loprx/tap/discmate
 ```
 
-当前下载包采用 ad hoc 签名，没有经过 Apple 公证。通过上面的 Homebrew cask 安装时，cask 会清除安装包上的隔离标记（`com.apple.quarantine`），因此首次打开无需再手动放行；这个步骤只作用于已安装的 DiscMate.app，不修改 Gatekeeper 或其他系统安全设置。若你手动下载 ZIP 后自行解压，首次打开可能提示“Apple 无法验证”，可先确认来源可信，再按 [Apple 的单应用放行步骤](https://support.apple.com/102445) 到「系统设置 → 隐私与安全性 → 仍要打开」操作，或对该副本执行 `xattr -dr com.apple.quarantine /Applications/DiscMate.app`。
+You can also check for updates in DiscMate settings. The app in the downloadable ZIP is ad hoc signed and has not been notarized by Apple. If macOS prompts on first launch, follow Apple’s instructions for opening an individual app. [Downloads and checksums](https://github.com/loprx/discmate/releases) · [Apple’s instructions](https://support.apple.com/102445)
 
-## 0.5.1
+## Build from source
 
-刻录诊断报告按毫秒记录任务阶段，并汇总同一光驱端口的 USB 传输错误、断连和重新枚举。点「导出脱敏诊断日志」即可查看。报告会标明系统日志的采集状态，设备电压仍需独立测量。
-
-## 0.5.0
-
-- 支持单物理分区的纯 UDF 1.02 数据 DVD+R 追加普通文件及目录。新会话保留卷名和旧文件区段。实测在有 89 个文件的盘上追加一张照片，合仓后 90 个文件全部读回，哈希逐个匹配。
-- 支持向符合条件的 ISO/UDF 1.02 混合 DVD+R 追加根目录普通文件，保留 ISO 短名和 UDF 完整文件名。数据 DVD+R 只有 ISO 9660 主目录时也支持导入普通文件与目录，此路径已通过离线验证。
-- 支持对已识别的未完成 DVD+R 会话手动收尾，以及续写符合条件的空白预留轨道。确认窗口显示将占用的空间。
-- 默认请求盘片最高速度 80% 以内的最快可用档位。写前重新核对盘片状态和剩余空间，改进了追加失败提示和帮助图标布局。
-
-纯 UDF 追加目前要求旧文件各占一个连续区段，新增普通文件须非空且小于 1 GiB。USB 光驱偶发超时或重新枚举仍可能影响刻录，任务结束后可重新装盘，使用读回校验确认结果。
-
-## 0.4.2
-
-构建号 `2026112503`。「正常推出」按钮只显示操作名称。将鼠标停在按钮上可查看当前快捷键，默认是 ⌘E。可在「设置 → 快捷键」中修改或关闭它。
-
-## 0.4.1
-
-构建号 `2026112502`。主窗口的「正常推出」按钮会显示当前快捷键，默认是 ⌘E。在「设置 → 快捷键 → 正常推出」中可以更改或关闭快捷键。关闭后仍可点击按钮取盘。
-
-## 0.3.14
-
-构建号 `2026111803`。顶部菜单「DiscMate → 设置…」（⌘,）可配置三项快捷键，也可关闭或恢复默认。默认 ⌘R 刷新设备、⌘⇧R 查看刻录摘要、⌘⇧↩ 开始刻录，写盘前仍需确认。
-
-添加文件、刻录摘要和光盘内容区的固定说明收进标题旁的 ⓘ。实时进度集中显示在主窗口底部的「当前任务进度」。
-
-## 0.3.13
-
-构建号 `2026111802`。在主窗口按 `Command+R`（⌘R）即可刷新设备，与「刷新设备」按钮共用请求合并、任务互斥和诊断日志。设备忙时请求排队，待当前操作真正结束后执行一次；快捷键不触发刻录。
-
-## 0.3.12
-
-构建号 `2026111701`。首次刻录与追加刻录统一在主窗口两栏下方显示「当前任务进度」，共用阶段、进度条、速率、耗时和连接提示；有百分比时不再同时显示等待转圈，收尾仍等待设备确认，任务结束后隐藏过期进度。
-
-对于 macOS 已只读挂载的 UDF 光盘，可使用「在访达打开当前 UDF 光盘」打开经目标盘、挂载来源与只读状态核对的目录。此功能不选择其他会话，也不开放 UDF 追加刻录。源码中的受限 UDF 1.02 增量镜像生成器仅供离线实验，未接入正常刻录入口。
-
-本版通过离线回归、诊断报告验证、arm64 构建与签名校验。进度调整未进行新的实盘刻录验收；UDF 只读打开已有本机验证，不能据此宣称 UDF 追加可用。既有 DVD+R ISO/Joliet 支持范围与自动收尾稳定性限制保持不变。
-
-## 0.3.11
-
-0.3.11 只调整构建、签名和发布链路，应用程序行为与 0.3.10 相同。构建会先清空旧的 `build/DiscMate.app` 再组装，ad hoc 签名固定使用 `local.discmate.app` 和 `local.discmate.app.mount`，发布 ZIP 改用 `ditto -c -k --sequesterRsrc --keepParent`。Homebrew cask 现在会在安装后清除已安装副本的隔离标记，因此首次打开通常不再需要手动放行；该步骤不关闭 Gatekeeper，也不修改其他系统安全设置。手动下载 ZIP 的用户仍按上一节说明自行放行。0.3.10 中关于刻录、追加和读回的实盘结论不变。
-
-## 0.3.10
-
-0.3.10 增加针对原光驱的一次托盘打开请求，并在弹出后 USB 断开时结束已完成任务的占用。软件分别记录系统刻录完成、推出命令接受和读回结果。build 2026102404 在一张新 DVD+R 上完成首次刻录、第二会话真增量追加、两次实体自动弹出和新旧文件读回。build 2026102406 更新亮色图标与数据页固定并列布局；同盘再完成两轮真增量追加，辅助挂载的最新会话四文件与源 SHA-256 全部一致；另一张全新空白 DVD+R 也通过首次刻录、第二会话追加和两文件读回。发布构建 2026102407 修复跨盘显示旧校验清单，已通过离线测试和构建，尚未再实盘刻录。另一张盘的偶发关闭会话停滞原因仍未知，不能据上述测试宣称长期稳定。
-
-## 0.3.9 预览版
-
-0.3.9 增加“从剪贴板添加”：在数据光盘页点击按钮或按 ⌘V，可把访达复制的本机文件/文件夹加入列表，或将不超过 1 MiB 的纯文本暂存为 TXT；也可把文件/文件夹拖入待刻录区域。添加本身不会写盘，仍需检查摘要并确认追加。一次三文件 DVD+R 追加完成自动弹出，重新合仓后，三个新增文件直接读回 SHA-256 及应用辅助最新会话挂载后的 MD5/SHA-256 均与源文件一致；七个旧文件的目录和区段保持，旧正文未在该轮重读。
-
-同一测试盘此前一次剪贴板文本追加在关闭会话时卡住，用户断开并重连光驱后，已写数据读回一致；随后按用户要求用一次非终结命令关闭会话，盘片恢复可追加。这个故障的根因尚未确认，不能把之后的一次成功当作长期收尾稳定性已解决。当前实盘支持范围仍限于已验证的 DVD+R ISO/Joliet 场景。
-
-## 0.3.8 预览版
-
-0.3.8 加入文件夹增量追加、追加前检查与大日志分页预览，并修复弹盘后收尾等待过久、快速合仓可能触发第二次推出的问题。默认离线回归、1.12 GB 旧文件回归及 arm64 构建通过。文件夹流程已在本机一张 DVD+R 上完成真实追加、重新装盘新增文件读回与应用辅助最新会话访问；收尾修复另经一次小文件实盘回归，空仓后约 3 秒解锁，重新插盘后未见第二次推出请求，新文件读回一致。自动收尾长期稳定性、2 秒确认窗内合仓及其他盘型仍待验证。
-
-## 数据光盘怎么用
-
-**刻录后系统校验：**在「数据光盘」页面的文件区域可随时设置「刻录后由系统校验」，无需先放入光盘；默认不勾选。它同时适用于首次刻录和追加。系统写后校验会增加耗时；跳过后仍可重新合仓，再单独进行读回校验。
-
-0.3.7 将此选项固定显示在文件区域，并提供悬浮提示和说明弹窗。一次 DVD+R 追加实测中，未勾选时系统未报告校验阶段；勾选时系统接受了校验设置并报告校验阶段。重新合仓后，两次新增文件均独立读回，SHA-256 与各自源清单一致。系统写后校验与独立文件读回是不同步骤。
-
-**首次刻录空白盘：**放入光盘并点击「刷新设备」，确认界面显示空白盘；添加文件。「保留后续追加能力（多会话）」始终显示并默认勾选；点击「查看刻录摘要」核对首次刻录设置，再点击「开始刻录」。
-
-数据光盘页的「1 · 添加要刻录的文件」「2 · 查看刻录摘要」及光盘内容、读回按钮始终显示。无盘或空白盘时不适用的按钮留在原位并置灰；“查看刻录摘要”和“开始刻录”是固定的两个按钮。“保留后续追加能力”旁的 ⓘ 说明适用条件和限制。
-
-**向已有数据盘追加：**放入仍可追加的盘，选择文件后软件会刷新一次设备状态。界面显示「已有数据光盘」时，同样点击「查看刻录摘要」，检查文件和空间，再点击「开始刻录」。多会话选项只显示盘片现状，不能改变旧会话。旧文件无需重新添加；新增文件不能与旧文件在同一相对路径冲突。0.3.8 允许同路径目录合并，不覆盖旧文件；不同目录可以包含同名文件。写入、系统校验及收尾期间保持光驱连接和供电，不要强行退出。
-
-**粘贴和拖入：**在数据光盘窗口按 ⌘V，或点击「从剪贴板添加」。访达复制的本机文件/文件夹会进入待刻录列表；纯文本会暂存为随机后缀的 `剪贴板文本-….txt`，上限 1 MiB。也可直接把 Finder 文件/文件夹拖进文件区域。移除暂存文本或清空列表会清理对应临时文件。此步骤不写盘；请在确认摘要前检查待刻录列表，写入期间不要修改或移走源文件。
-
-**完成后读取：**写入任务结束并不等于独立读回完成。重新合仓并刷新设备；如果访达仍显示旧会话，点击「在访达打开最新内容」，按提示授权只读挂载。需要核对内容时，可在「可选：读回校验」中只校验本次新增文件，或完整读取所有文件。完整读取大盘会明显更久。读回和挂载结束不会自动弹盘；需要取盘时点击「正常推出」。
-
-**设备状态暂不可用：**写入和系统校验结束后，软件会继续等待光驱状态稳定；同一光驱恢复时重新确认，不能依据失效的空仓状态直接认定已弹出。若仍无法确认，点击「重新检查设备」进行只读状态检查，再核验新增文件；无需为清除界面锁而重启软件。该恢复路径已通过离线回归，间歇性光驱断开和自动收尾仍需更多实盘验证。
-
-**收尾与重新插盘：**检测到原光驱空仓且设备状态与 IORegistry 一致后，确认窗口由 15 秒缩为 2 秒；若确认期间介质重新出现，停止后备推出并提示只读重新识别。后备普通推出前复核写入前盘片身份。一次同盘小文件实盘回归在约 3 秒后解锁，重新插盘后应用未再次发出推出请求，新文件读回匹配；2 秒窗内合仓分支仍仅有离线测试，长期稳定性未关闭。
-
-菜单栏「帮助 → DiscMate 使用帮助」包含上述操作和常见故障处理。盘上已有文件会以可滚动列表显示名称、类型、大小和所在会话；读取这些目录元数据无需扫描旧文件正文。
-
-「可选：读回校验」和「更多工具与诊断」可以点击整行标题展开或收起，也支持键盘与辅助功能操作。
-
-### 进度、刻录速率与诊断（0.3.6）
-
-设备插拔、光盘合仓/推出通过系统通知自动刷新，不定时轮询；任务及恢复锁期间暂缓刷新。手动“刷新设备”仍可用于重新检查，也可在主窗口按 `Command+R`（⌘R）。
-
-首次数据 DVD+R 刻录在中文主窗口显示阶段、进度条和已用时间，使用与追加相同的专用线程收尾检查及一次普通推出。收尾状态不明时需先重新检查设备；其他盘型及音频/镜像/擦除仍使用系统面板。首次数据 DVD+R 已完成一次小文件自动弹出及重载哈希比对；长期稳定性仍在验证。百分比不可用时显示等待进度，剩余时间只估计当前阶段。系统任务结束不代表实际推出或独立读回完成。
-
-默认选择当前光驱和盘片报告的最快档位的 80% 以内能用的最高档。例如支持 4×、6×、8× 时，默认请求 6×。没有符合条件的档位时，请手动选择具体速率或系统最高速度。写入前重新核对档位，实际速度由设备调整；系统设置面板另选更低速度时，采用较低值。
-
-已有数据盘初次识别时，若系统报告允许追加，界面显示“追加条件待核实”。查看摘要时，DiscMate 只读检查 DVD+R 的会话、文件系统、下一写入位置和剩余空间。已封盘、空间用尽、当前格式不支持追加或写入状态无法确认时，刻录入口停用，仍可使用适用的只读操作。
-
-DVD+R 的旧会话只有 ISO 9660 主目录时，也可导入普通文件和目录。新会话同时生成 ISO 和 Joliet 目录，旧文件引用原区段。准备镜像时会检查旧 ISO 路径能否继续指向原文件；依赖其他命名空间、符号链接或特殊文件的目录暂不支持。该路径已通过离线多会话镜像、独立提取和 SHA-256 比对，实盘写入待验证。
-
-点击「导出脱敏诊断日志」，选择任务、预览 JSON 后保存。记录软件/系统版本、阶段时序、数值错误、可用的 SCSI 错误字段、会话/容量数值、请求/实际速率及已取得的设备状态。刷新任务会额外只读记录已知 Lenovo 光驱在 USB、光盘驱动和 DVD 介质层的节点数量；这些数量仅用于定位识别停在哪一步，不证明盘片可读。不含文件名、路径、文件正文、哈希、盘片标识、原始设备响应或凭据；导出本身不会探测光驱或自动上传。仅采集新版本运行后的任务，无法补录旧版缺失信息；缺失字段保持未知。
-
-最近保留 30 个任务，每次最多 256 条事件，优先保留阶段边界及错误，省略数量在报告的 `omittedEventCount` 中标明：这是因保留上限而未保存的事件数，不是配置项，也不是预览其他页的条目数；已省略的事件无法从报告恢复。0.3.8 在后台准备预览，每页最多 8 KiB；保存仍包含所选任务的全部已保留事件。原始本机任务记录不会混入此导出文件。界面和日志改动已做离线验证；0.3.6（2026101402）的 DVD+R 追加、诊断记录及读回已完成一次实盘验收，其他入口仍需分别验证。
-
-## 已验证范围与限制
-
-- 已实盘验证：数据 DVD+R、ISO 9660/Joliet、根目录普通文件的多次追加和读回，以及本机一张 DVD+R 上多层中文/空目录文件夹的一次增量追加和新增内容读回；旧文件区段保持，旧正文未在文件夹这一轮重新哈希。
-- 单个新增文件及新会话镜像均须小于 4 GiB。0.3.8 支持多层、中文与空目录追加；不支持同路径覆盖、删除、重命名、符号链接或特殊文件，也不保证保留来源权限、扩展属性和时间戳。相对路径最多 8 层，每段名称最多 64 个 UTF-16 字符，总计最多 10,000 个项目；超限或名称不兼容时会拒绝准备。
-- 默认的访达挂载可能选择较早会话，因此应用提供「在访达打开最新内容」。重新插盘后如需最新会话，仍须由应用重新识别和打开。
-- 自动收尾/弹出曾出现不稳定，仍在实盘验证；应以介质实际推出和重新读回判断结果，不能只看刻录 API 的“完成”。
-- 0.3.6（2026101402）在同一 DVD+R 上从 3 个会话追加到 4 个会话：用户确认实际自动弹出；合仓后新增文件 SHA-256 与源文件一致，3 个旧文件区段保持不变且 4 个文件均可读；应用辅助只读挂载的最新会话在访达显示 4 个文件。此前一次合仓后 macOS 曾暂时只识别 USB 设备、未提供光盘驱动，重新连接 USB 后恢复。原因尚未确定，不能把这次异常恢复视作正常使用步骤。
-- CD、其他 DVD 类型、蓝光和其他文件系统未完成同等实盘验证。其他刻录入口使用 macOS DiscRecording，但不能据此视作已验证的追加能力。
-- 最新会话的只读挂载助手目前使用已弃用的授权 API，未来 macOS 版本的兼容性需要继续处理。
-- 此前另一张测试盘曾出现最新会话只读挂载失败；本次文件夹测试盘的应用辅助只读挂载已通过。macOS 默认自动挂载仍可能显示旧会话，不能把一次成功推广到所有盘片。
-
-请先用可消耗的测试盘试用，重要资料应另有备份。[发布版本与校验值](https://github.com/loprx/discmate/releases)可在 GitHub Releases 查看。
-
-## 从源码构建
-
-需要 Xcode Command Line Tools 和 macOS 自带的 `hdiutil`。构建与离线测试不会写入光盘：
+Install the Xcode Command Line Tools, then run the commands below. Tests use local images. The build produces `build/DiscMate.app`.
 
 ```sh
 zsh test.sh
-zsh test.sh --large-iso  # 可选：1.12 GB 离线回归
+zsh test.sh --large-iso  # Optional 1.12 GB offline regression
 zsh build.sh
 ```
 
-产物位于 `build/DiscMate.app`。源代码采用 [MIT 许可证](LICENSE)。
+[Changelog (Chinese)](CHANGELOG.md) · [MIT license](LICENSE)
 
-诊断界面可用 `zsh test-diagnostics-ui.sh` 构建独立测试 App：只生成合成任务，不链接设备模块，也不会自动启动。该测试已验证约 299 KB 的恢复报告分页、任务切换、刷新、关闭和完整导出；不能代替真实光盘流程验收。
+## Contributing and releases
 
-## 提交改动与发布
+Branch from the public repository’s `main` branch and open a pull request. Describe the user-visible change in the title, which appears in the release notes. Use `bug` for fixes, `enhancement` or `accessibility` for improvements, and `documentation` for docs. Other pull requests appear under “Other updates”.
 
-每项功能或修复从公开仓库的 `main` 建分支并提交 PR。PR 标题会出现在发布说明中，请写清用户能观察到的变化。修复使用 `bug` 标签，功能改进使用 `enhancement` 或 `accessibility`，文档使用 `documentation`。其余 PR 归入「其他更新」。
-
-合并待发布的 PR 后，在公开 `main` 的发布提交上推送正式版本 tag（如 `v0.5.2`）。GitHub Actions 会测试、构建并发布安装包，按已合并 PR 自动生成分类说明，再更新 Homebrew cask。
+After merging the release’s pull requests, tag the release commit on public `main` (for example, `v0.5.2`). GitHub Actions tests, builds and publishes the package, generates release notes from merged pull requests, and updates the Homebrew cask.
