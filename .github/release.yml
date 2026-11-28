@@ -1,0 +1,10 @@
+changelog:
+  categories:
+    - title: 问题修复
+      labels: [bug]
+    - title: 新功能与改进
+      labels: [enhancement, accessibility]
+    - title: 文档
+      labels: [documentation]
+    - title: 其他更新
+      labels: ["*"]
