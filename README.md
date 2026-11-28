@@ -146,3 +146,9 @@ zsh build.sh
 产物位于 `build/DiscMate.app`。源代码采用 [MIT 许可证](LICENSE)。
 
 诊断界面可用 `zsh test-diagnostics-ui.sh` 构建独立测试 App：只生成合成任务，不链接设备模块，也不会自动启动。该测试已验证约 299 KB 的恢复报告分页、任务切换、刷新、关闭和完整导出；不能代替真实光盘流程验收。
+
+## 提交改动与发布
+
+每项功能或修复从公开仓库的 `main` 建分支并提交 PR。PR 标题会出现在发布说明中，请写清用户能观察到的变化。修复使用 `bug` 标签，功能改进使用 `enhancement` 或 `accessibility`，文档使用 `documentation`。其余 PR 归入「其他更新」。
+
+合并待发布的 PR 后，在公开 `main` 的发布提交上推送正式版本 tag（如 `v0.5.2`）。GitHub Actions 会测试、构建并发布安装包，按已合并 PR 自动生成分类说明，再更新 Homebrew cask。
