@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import DiscRecording
 
 @MainActor
 final class SessionModel: ObservableObject {
@@ -50,9 +49,14 @@ final class SessionModel: ObservableObject {
         return pendingProof?.files.reduce(0) { $0 + $1.bytes } ?? 0
     }
     private var task: Task<Void, Never>?
-    private var diagnosticTaskID: UUID?
+    private(set) var diagnosticTaskID: UUID?
     private let coordinator: DeviceTaskCoordinator
-    init(coordinator: DeviceTaskCoordinator? = nil) { self.coordinator = coordinator ?? .shared }
+    private let selectWriter: (SessionSnapshot) -> any AppendWriter
+    init(coordinator: DeviceTaskCoordinator? = nil,
+         selectWriter: @escaping (SessionSnapshot) -> any AppendWriter = AppendWriters.select) {
+        self.coordinator = coordinator ?? .shared
+        self.selectWriter = selectWriter
+    }
     var diagnosticDriveModel: DiagnosticDriveModel = .unknown
     var diagnosticMediaType: DiagnosticMediaType = .unknown
     @Published var selectedBurnSpeed: BurnSpeedSelection = .reduced
@@ -269,12 +273,12 @@ final class SessionModel: ObservableObject {
                     throw DiscFailure("系统尚未挂载这张 UDF 光盘；请先在访达确认光盘可见，再重新检查设备。没有执行强制挂载。")
                 }
                 try identity.validate()
+                guard NSWorkspace.shared.open(path) else { throw DiscFailure("访达未能打开已核对来源的 UDF 目录。") }
                 self.unsupportedFilesystem = unsupported.revision == 0x0102 ? .udf102 : .udfOther
                 self.diagnostic(.mountCompleted, evidence: DiagnosticEvidence(disc:
                     DiagnosticDiscEvidence(filesystem: self.unsupportedFilesystem)))
                 self.transition(.ready, "已在访达打开系统当前挂载的 UDF 光盘；只读访问，未选择或验证其他会话，也未写盘。当前盘片布局暂不支持追加。")
                 self.log("UDF_SYSTEM_MOUNT_OPENED; readOnly=true; sessionSelection=system; filesVerified=false")
-                NSWorkspace.shared.open(path)
                 return
             }
             if expected.udf != nil {
@@ -283,9 +287,16 @@ final class SessionModel: ObservableObject {
                     throw DiscFailure("系统尚未挂载这张 UDF 光盘。可使用直接读回校验。")
                 }
                 try expected.identity.validate()
-                self.diagnostic(.mountCompleted, evidence: DiagnosticEvidence(disc: DiagnosticDiscEvidence(filesystem: .udf102)))
-                self.transition(.ready, "已打开系统当前挂载的 UDF 目录。可用直接读回校验检查最新会话。")
-                NSWorkspace.shared.open(path)
+                if expected.vat != nil {
+                    try await Task.detached {
+                        try MountedSessionDirectory.validate(root: path,
+                            entries: Dictionary(uniqueKeysWithValues: expected.treeEntries.map { ($0.name, $0) }))
+                        try expected.identity.validate()
+                    }.value
+                }
+                guard NSWorkspace.shared.open(path) else { throw DiscFailure("访达未能打开当前 UDF 光盘。") }
+                self.diagnostic(.mountCompleted, evidence: DiagnosticEvidence(disc: DiagnosticDiscEvidence(filesystem: expected.filesystem)))
+                self.transition(.ready, expected.vat == nil ? "已打开系统当前挂载的 UDF 目录。可用直接读回校验检查最新会话。" : "已核对当前挂载目录与最新 VAT 会话的文件名和大小，并在访达打开。")
                 return
             }
             guard !expected.incompleteSession else {
@@ -300,34 +311,32 @@ final class SessionModel: ObservableObject {
             }
             let mounting = try SessionMountService()
             let path: URL
-            if let existing = try mounting.currentMount(fresh.identity),
-               existing.lastPathComponent.hasPrefix("DiscMate-Session-\(fresh.latest.session)-"),
-               dm_mount_matches(existing.path, fresh.identity.bsd) == 0 {
-                // Reuse our existing read-only mount after checking media/session identity.
+            if let existing = try mounting.matchingMount(fresh) {
+                self.diagnostic(.mountReused)
                 path = existing
             } else {
-            guard let helpers = Bundle.main.builtInPlugInsURL?.deletingLastPathComponent() else {
-                throw DiscFailure("无法定位应用内挂载助手。")
-            }
-            let helper = helpers.appendingPathComponent("Helpers/DiscMateMount").path
-            guard FileManager.default.isExecutableFile(atPath: helper) else { throw DiscFailure("缺少应用内只读挂载助手，请重新构建。") }
-            self.transition(.authorizing, "请在 macOS 授权窗口中允许本次只读挂载；应用不接收或保存密码。")
-            let authorization = try await Task.detached { try MountAuthorization(helper: helper) }.value
-            self.transition(.unmounting, "正在卸载旧目录；不会弹出光盘…")
-            try await mounting.unmount(fresh)
-            self.transition(.mounting, "正在只读挂载最新会话…")
-            path = try await Task.detached { try authorization.mount(fresh) }.value
+                guard let helpers = Bundle.main.builtInPlugInsURL?.deletingLastPathComponent() else {
+                    throw DiscFailure("无法定位应用内挂载助手。")
+                }
+                let helper = helpers.appendingPathComponent("Helpers/DiscMateMount").path
+                guard FileManager.default.isExecutableFile(atPath: helper) else { throw DiscFailure("缺少应用内只读挂载助手，请重新构建。") }
+                self.transition(.authorizing, "请在 macOS 授权窗口中允许本次只读挂载；应用不接收或保存密码。")
+                let authorization = try await Task.detached { try MountAuthorization(helper: helper) }.value
+                self.transition(.unmounting, "正在卸载旧目录；不会弹出光盘…")
+                try await mounting.unmount(fresh) { self.diagnostic($0, error: $1) }
+                self.transition(.mounting, "正在只读挂载最新会话…")
+                path = try await Task.detached { try authorization.mount(fresh) }.value
             }
             // Opening a folder must not implicitly stream the entire disc.
             try await Task.detached {
-                try MountedSessionDirectory.validate(root: path,
-                    entries: Dictionary(uniqueKeysWithValues: fresh.treeEntries.map { ($0.name, $0) }))
+                try MountedSessionDirectory.validateISO(root: path, snapshot: fresh)
                 try fresh.identity.validate()
             }.value
+            try checkSystem(dm_mount_matches(path.path, fresh.identity.bsd), "复核访达目录来源")
+            guard NSWorkspace.shared.open(path) else { throw DiscFailure("访达未能打开已核对的光盘目录。") }
             self.mountedURL = path
             self.diagnostic(.mountCompleted)
             self.transition(.ready, "最新会话已只读打开；本次挂载仅核对目录，不重复校验文件正文。读完后如需取盘，请点击“正常推出”。")
-            NSWorkspace.shared.open(path)
         }
     }
     func verifyRecorded(addedOnly: Bool = false, bsd: String? = nil) {
@@ -400,7 +409,7 @@ final class SessionModel: ObservableObject {
             let prepared = try await Task.detached {
                 try snapshot.identity.validate()
                 let directory = FileManager.default.temporaryDirectory.appendingPathComponent("discmate-incremental-\(UUID().uuidString)")
-                let result = try IncrementalISO.build(snapshot: snapshot, verified: [], sources: sources, directory: directory)
+                let result = try AppendImagePreparation.build(snapshot: snapshot, verified: [], sources: sources, directory: directory)
                 var accepted = false
                 defer {
                     if !accepted {
@@ -432,16 +441,16 @@ final class SessionModel: ObservableObject {
         guard incrementalWriteEnabled, !blocksDeviceOperations, let prepared = incrementalPlan, let snapshot = incrementalSnapshot else { return }
         let selectedSpeed = selectedBurnSpeed
         let selectedVerification = verifyAfterWrite
+        let request = AppendWriteRequest(snapshot: snapshot, prepared: prepared, drivePath: drivePath,
+                                         speed: selectedSpeed, verify: selectedVerification)
+        let operation = AppendWriteOperation(request, select: selectWriter)
+        let confirmation = operation.confirmation(rates: supportedBurnSpeeds)
         let alert = NSAlert()
-        alert.messageText = "开始追加 \(prepared.addedFileCount) 个文件、\(prepared.addedDirectoryCount) 个目录？"
-        alert.informativeText = "新增镜像 \(OperationEstimate.size(prepared.imageBytes))；保留 \(prepared.preservedFileCount) 个旧文件的原区段，不重写旧内容。盘片空间会永久占用，并保留后续追加能力。\n刻录速率：\(selectedSpeed.label())；实际速度由设备调整。\n\n\(OperationEstimate.burn(prepared.imageBytes, verifyAfterWrite: selectedVerification))。\(selectedVerification ? "包含系统写后校验" : "跳过系统写后校验")，完成后自动推出。旧文件正文未在本轮校验；独立读回需重新合仓后手动执行。\n\n开始后请勿断开光驱、电源或强行退出；当前追加流程不支持安全中途取消。文件夹已在本机一张 DVD+R 验证；自动结束长期稳定性仍待验证。"
-        if let reserved = snapshot.reservedTrack {
-            alert.messageText = "续写第 \(reserved.session) 会话的预留轨道？"
-            alert.informativeText = "新增 \(prepared.addedFileCount) 个文件，保留 \(prepared.preservedFileCount) 个旧文件的原区段。关闭轨道会永久占用约 \(OperationEstimate.size(UInt64(reserved.blocks) * 2048))。\n速率：\(selectedSpeed.label(supported: supportedBurnSpeeds))。将核对源文件、写入镜像、关闭会话并读回新增文件。请保持光驱连接，完成后光盘留在仓内。"
-        }
+        alert.messageText = confirmation.title
+        alert.informativeText = confirmation.detail
         alert.addButton(withTitle: "开始追加"); alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        start(kind: .append, fileCount: prepared.proof.files.count, totalBytes: prepared.proof.files.reduce(0) { $0 + $1.bytes }, preserving: prepared.image) {
+        start(kind: .append, fileCount: prepared.proof.files.count, totalBytes: prepared.proof.files.reduce(0) { $0 + $1.bytes }, preserving: prepared.image, drivePath: drivePath) {
             defer { self.discardImageDirectory(prepared.image) }
             self.warning?.cancel(); self.warning = nil
             self.transition(.preparing, "正在复核源文件与目录是否变化；尚未写盘。请勿修改来源或更换光盘。")
@@ -467,32 +476,28 @@ final class SessionModel: ObservableObject {
                 requestedSpeedAutomatic: selectedSpeed == .automatic,
                 reducedSpeedRequested: selectedSpeed == .reduced,
                 verifyAfterWriteRequested: selectedVerification))
-            if snapshot.reservedTrack != nil {
-                guard let drivePath else { throw DiscFailure("原光驱不可用。") }
-                try await self.writeReserved(snapshot, prepared: prepared, path: drivePath, speed: selectedSpeed)
-                return
-            }
             var lastStatus = ""
             var measuredState = ""
             var phaseStarted = Date()
             var verificationObserved = false
             var mediaReturnedDuringCompletion = false
-            try await DiscBurnService.burn(snapshot: snapshot, proof: prepared.proof,
-                source: .isoImage(prepared.image, bytes: prepared.imageBytes, sha256: prepared.imageSHA256),
-                speed: selectedSpeed, verifyAfterWrite: selectedVerification, sourceValidation: prepared) { update in
+            let outcome = try await operation.write { event in
+                guard case let .progress(update, diagnosticEvent, title, starting) = event else {
+                    self.observeAppendEvent(event)
+                    return
+                }
                 let state = update.state, fraction = update.fraction
-                if state == DRStatusStateVerifying { verificationObserved = true }
-                if state == "MediaReturned" { mediaReturnedDuringCompletion = true }
-                let event = update.diagnosticEventKind
-                if state == "RegistryMedia" {
-                    self.diagnostic(event, error: update.errorCode.map { NSError(domain: NSPOSIXErrorDomain, code: Int($0)) }, evidence: update.evidence)
-                } else { self.diagnostic(event, fraction: fraction, code: update.errorCode, evidence: update.evidence, errorSource: update.errorSource) }
-                if state == "Starting" {
+                if diagnosticEvent == .verifying { verificationObserved = true }
+                if diagnosticEvent == .mediaReturnedDuringCompletion { mediaReturnedDuringCompletion = true }
+                if diagnosticEvent == .registryObserved {
+                    self.diagnostic(diagnosticEvent, error: update.errorCode.map { NSError(domain: NSPOSIXErrorDomain, code: Int($0)) }, evidence: update.evidence)
+                } else { self.diagnostic(diagnosticEvent, fraction: fraction, code: update.errorCode, evidence: update.evidence, errorSource: update.errorSource) }
+                if starting {
                     self.log("backend detail=\(update.detail)")
                     self.transition(.burning, "正在追加文件；请勿退出程序或断开光驱。")
                     return
                 }
-                if update.kind == .backend { self.actualBurnSpeedKBps = state == DRStatusStateTrackWrite ? update.evidence?.actualSpeedKBps : nil }
+                if update.kind == .backend { self.actualBurnSpeedKBps = diagnosticEvent == .writing ? update.evidence?.actualSpeedKBps : nil }
                 if update.kind == .device {
                     self.log("device \(update.detail)"); return
                 }
@@ -502,17 +507,13 @@ final class SessionModel: ObservableObject {
                 if update.kind == .warning {
                     self.message = update.detail; self.log("warning \(update.detail)"); return
                 }
-                let titles = [DRStatusStatePreparing: "准备刻录", DRStatusStateSessionOpen: "正在开启新会话",
-                              DRStatusStateTrackWrite: "正在写入", DRStatusStateSessionClose: "正在关闭会话",
-                              DRStatusStateFinishing: "系统正在执行结束动作",
-                              DRStatusStateVerifying: "正在进行系统校验", DRStatusStateDone: "系统任务已结束，等待设备确认"]
                 let percent = fraction.flatMap { $0.isFinite && (0...1).contains($0) ? Int($0 * 100) : nil }
-                let status = (titles[state] ?? "系统正在处理刻录任务") + (percent.map { " · \($0)%" } ?? "")
+                let status = title + (percent.map { " · \($0)%" } ?? "")
                 if measuredState != state {
                     measuredState = state; phaseStarted = Date(); self.remainingEstimate = nil
                 }
                 if let fraction, fraction.isFinite, fraction > 0.02, fraction < 1,
-                   [DRStatusStateTrackWrite, DRStatusStateVerifying].contains(state),
+                   [DiagnosticEventKind.writing, .verifying].contains(diagnosticEvent),
                    Date().timeIntervalSince(phaseStarted) > 5 {
                     let elapsed = Date().timeIntervalSince(phaseStarted)
                     self.remainingEstimate = "当前阶段 " + OperationEstimate.duration(elapsed * (1 - fraction) / fraction)
@@ -521,6 +522,15 @@ final class SessionModel: ObservableObject {
                 if self.phase != .finishing { self.message = status }
                 if !update.detail.isEmpty { self.log("backend detail=\(update.detail)") }
                 if status != lastStatus { self.log("backend=\(state) \(status)"); lastStatus = status }
+            }
+            if case .readBack(let fresh) = outcome {
+                self.snapshot = fresh
+                self.recordDisc(fresh)
+                self.diagnostic(prepared.proof.files.isEmpty ? .readbackDirectoryMatched : .readbackAddedSourcesMatched)
+                self.log("RESERVED_READBACK_MATCH session=\(fresh.latest.session) start=\(fresh.latest.start) hashes=\(prepared.proof.files.count)")
+                self.transition(.ready, "第 \(fresh.latest.session) 会话已关闭；已核对 \(prepared.proof.files.count) 个新增文件的 SHA-256 和旧文件区段，盘片留在仓内。")
+                self.watchIdentity()
+                return
             }
             self.snapshot = nil; self.mountedURL = nil; self.verified = []
             let verification = verificationObserved ? "系统报告校验阶段" :
@@ -531,44 +541,27 @@ final class SessionModel: ObservableObject {
             self.transition(.awaitingReload, "\(finish)\(verification)；尚未完成重新装盘读回。")
         }
     }
-    private func writeReserved(_ snapshot: SessionSnapshot, prepared: PreparedIncrementalISO,
-                               path: String, speed: BurnSpeedSelection) async throws {
-        try await Task.detached { try ManualSessionClose(snapshot: snapshot, drivePath: path).checkTarget() }.value
-        transition(.unmounting, "正在正常卸载已确认的 DVD+R。")
-        try await SessionMountService().unmountForSessionClose(snapshot.identity)
-        mountedURL = nil
-        transition(.burning, "正在续写预留轨道并关闭会话。请保持光驱连接。")
-        let completion = try await Task.detached {
-            try ReservedAppend.write(snapshot: snapshot, prepared: prepared, path: path, speed: speed)
-        }.value
-        invalidateDeviceCache()
-        log("reservedAppend result=\(completion.result) requestedKBps=\(completion.speed) lastOpcode=\(completion.evidence.sessionClose?.lastOpcode ?? 0)")
-        guard completion.result == 0 else {
-            let uncertain = completion.evidence.sessionClose?.attempted == true || (completion.evidence.sessionClose?.releaseResult ?? 0) != 0
-            diagnostic(uncertain ? .sessionCloseUnconfirmed : .sessionCloseRejected, code: Int64(completion.result),
-                       evidence: completion.evidence, errorSource: .osStatus)
-            if uncertain { throw BurnRecoveryRequired(detail: "预留轨道操作中断，盘片状态待确认（\(completion.result)）。请先重新检查设备。") }
-            throw NSError(domain: NSOSStatusErrorDomain, code: Int(completion.result),
-                          userInfo: [NSLocalizedDescriptionKey: "预留轨道写前复核或设置失败（\(completion.result)），未写盘。"])
+    private func observeAppendEvent(_ event: AppendWriteEvent) {
+        switch event {
+        case .unmounting:
+            transition(.unmounting, "正在正常卸载已确认的 DVD+R。")
+        case let .deviceOperation(kind, error):
+            diagnostic(kind, error: error)
+        case .unmounted:
+            mountedURL = nil
+            transition(.burning, "正在续写预留轨道并关闭会话。请保持光驱连接。")
+        case let .closeResult(kind, result, speed, evidence):
+            invalidateDeviceCache()
+            log("reservedAppend result=\(result) requestedKBps=\(speed) lastOpcode=\(evidence.sessionClose?.lastOpcode ?? 0)")
+            diagnostic(kind, code: result == 0 ? nil : Int64(result), evidence: evidence, errorSource: .osStatus)
+        case .readingBack:
+            transition(.verifying, "会话已关闭，正在重新识别目录并读回本次新增文件。")
+            diagnostic(.readbackAddedStarted)
+        case .readbackFailed(let error):
+            diagnostic(.readbackFailed, error: error)
+        case .progress:
+            break
         }
-        diagnostic(.sessionCloseConfirmed, evidence: completion.evidence)
-        transition(.verifying, "会话已关闭，正在重新识别目录并读回本次新增文件。")
-        diagnostic(.readbackAddedStarted)
-        let fresh: SessionSnapshot
-        do {
-            fresh = try await Task.detached {
-                try await ReservedAppend.readback(path: path, driveID: completion.driveID, proof: prepared.proof)
-            }.value
-        } catch {
-            diagnostic(.readbackFailed, error: error as NSError)
-            throw DiscFailure("光驱已确认会话关闭，读回尚未通过：\(error.localizedDescription)")
-        }
-        self.snapshot = fresh
-        recordDisc(fresh)
-        diagnostic(prepared.proof.files.isEmpty ? .readbackDirectoryMatched : .readbackAddedSourcesMatched)
-        log("RESERVED_READBACK_MATCH session=\(fresh.latest.session) start=\(fresh.latest.start) hashes=\(prepared.proof.files.count)")
-        transition(.ready, "第 \(fresh.latest.session) 会话已关闭；已核对 \(prepared.proof.files.count) 个新增文件的 SHA-256 和旧文件区段，盘片留在仓内。")
-        watchIdentity()
     }
 
     func reveal() {
@@ -585,12 +578,12 @@ final class SessionModel: ObservableObject {
             message = "盘片或会话已变化，请重新识别。"
             return
         }
-        start(kind: .closeSession) {
+        start(kind: .closeSession, drivePath: target.drivePath) {
             self.recordDisc(target.snapshot)
             self.transition(.preparing, "正在复核光驱和待关闭的会话。")
             try await Task.detached { try target.checkTarget() }.value
             self.transition(.unmounting, "正在正常卸载光盘，请保持光驱连接。")
-            try await SessionMountService().unmountForSessionClose(target.snapshot.identity)
+            try await SessionMountService().unmountForSessionClose(target.snapshot.identity) { self.diagnostic($0, error: $1) }
             self.mountedURL = nil
             self.diagnostic(.sessionCloseChecked)
             self.transition(.finishing, "正在复核轨道、关闭末次会话并读取关闭状态，请保持光驱连接。")
@@ -615,14 +608,14 @@ final class SessionModel: ObservableObject {
         guard let drivePath, !blocksDeviceOperations else { return }
         let knownIdentity = snapshot?.identity
         guard knownIdentity != nil || bsd != nil else { return }
-        start(kind: .eject) {
+        start(kind: .eject, drivePath: drivePath) {
             let identity = try await Task.detached {
                 if let knownIdentity { try knownIdentity.validate(); return knownIdentity }
                 return try MediaIdentity.current(bsd!)
             }.value
             self.transition(.finishing, "正在通过系统磁盘服务正常推出；不会刻录或强制卸载。")
             let service = try DiscEjectService()
-            try await service.eject(identity, drivePath: drivePath) { text in
+            try await service.eject(identity, drivePath: drivePath, trace: { self.diagnostic($0, error: $1) }) { text in
                 self.message = text; self.log("normal-eject \(text)")
             }
             self.snapshot = nil; self.mountedURL = nil; self.verified = []
@@ -632,7 +625,7 @@ final class SessionModel: ObservableObject {
     }
     func ejectBlankDisc(drivePath: String?) {
         guard let drivePath, !blocksDeviceOperations else { return }
-        start(kind: .eject) {
+        start(kind: .eject, drivePath: drivePath) {
             self.transition(.finishing, "正在正常推出空白盘；不会刻录或强制卸载。")
             try await BlankDiscEjectService.eject(drivePath: drivePath) {
                 self.diagnostic(.ejectRequested)
@@ -643,11 +636,11 @@ final class SessionModel: ObservableObject {
         }
     }
     private func start(kind: DiagnosticTaskKind = .deviceRefresh, fileCount: Int? = nil,
-                       totalBytes: UInt64? = nil, preserving image: URL? = nil,
+                       totalBytes: UInt64? = nil, preserving image: URL? = nil, drivePath: String? = nil,
                        _ operation: @escaping @MainActor () async throws -> Void) {
         guard let lease = coordinator.begin() else { return }
         guard deviceGate.beginOperation() else { coordinator.finish(lease); return }
-        diagnosticTaskID = DiagnosticReportStore.shared.startTask(kind: kind, media: diagnosticMediaType, driveModel: diagnosticDriveModel, fileCount: fileCount, totalBytes: totalBytes)
+        diagnosticTaskID = DiagnosticReportStore.shared.startTask(kind: kind, media: diagnosticMediaType, driveModel: diagnosticDriveModel, fileCount: fileCount, totalBytes: totalBytes, drivePath: drivePath)
         recoveryNotice = nil
         if kind == .appendPreparation { appendPreparationFailure = nil }
         discardPreparedPlan(preserving: image)

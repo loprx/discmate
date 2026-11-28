@@ -15,6 +15,20 @@ final class MountAuthorization: @unchecked Sendable {
         self.token = token
     }
     deinit { dm_release_authorization(token) }
+    func unmountSession(_ identity: MediaIdentity) throws {
+        var output = [CChar](repeating: 0, count: 8192)
+        let status = dm_authorized_mount(token, helper, identity.bsd, String(identity.registryID),
+            "unmount", &output, output.count)
+        try checkSystem(status, "启动会话卸载助手")
+        let response = String(cString: output)
+        guard response.hasPrefix("OK\t") else {
+            let fields = response.split(separator: "\t")
+            if fields.count >= 2, let code = Int32(fields[1]), code != 0 {
+                try checkSystem(code, "正常卸载光盘会话目录")
+            }
+            throw DiscFailure("助手未确认卸载会话目录。")
+        }
+    }
     func mount(_ snapshot: SessionSnapshot) throws -> URL {
         var output = [CChar](repeating: 0, count: 8192)
         let status = dm_authorized_mount(token, helper, snapshot.identity.bsd,
@@ -59,9 +73,19 @@ final class SessionMountService {
         }
         return disk
     }
-    func currentMount(_ identity: MediaIdentity) throws -> URL? {
-        let description = DADiskCopyDescription(try disk(identity)) as? [String: Any]
-        return description?[kDADiskDescriptionVolumePathKey as String] as? URL
+    func matchingMount(_ snapshot: SessionSnapshot) throws -> URL? {
+        guard let volume = snapshot.volume else { throw DiscFailure("缺少 ISO 根目录地址。") }
+        try snapshot.identity.validate()
+        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        let code = dm_existing_iso_mount(snapshot.identity.bsd, volume.root.lba, &path, path.count)
+        if code == ENOENT { return nil }
+        if code == EBUSY {
+            let description = DADiskCopyDescription(try disk(snapshot.identity)) as? [String: Any]
+            if description?[kDADiskDescriptionVolumePathKey as String] is URL { return nil }
+            try checkSystem(code, "光盘已有其他挂载，请先正常卸载该卷再打开最新目录")
+        }
+        try checkSystem(code, "核对当前光盘挂载")
+        return URL(fileURLWithPath: String(cString: path))
     }
     /// Open only the system's existing UDF mount. This does not claim that a
     /// multisession UDF disc was mounted at its newest session.
@@ -73,10 +97,10 @@ final class SessionMountService {
         try checkSystem(dm_udf_mount_matches(path.path, identity.bsd), "确认 UDF 只读挂载来源")
         return path
     }
-    func unmountForSessionClose(_ identity: MediaIdentity) async throws {
+    func unmountForSessionClose(_ identity: MediaIdentity, trace: (DiagnosticEventKind, NSError?) -> Void) async throws {
         let whole = try disk(identity)
         do {
-            try await normalUnmount(whole, options: DADiskUnmountOptions(kDADiskUnmountOptionWhole))
+            try await normalUnmount(whole, options: DADiskUnmountOptions(kDADiskUnmountOptionWhole), trace: trace)
         } catch let error as NSError where error.domain == NSOSStatusErrorDomain &&
             UInt32(truncatingIfNeeded: error.code) == UInt32(truncatingIfNeeded: kDAReturnNotMounted) {
             // The whole-disc request also covers children. Already unmounted is sufficient.
@@ -84,23 +108,33 @@ final class SessionMountService {
         try identity.validate()
     }
 
-    func unmount(_ snapshot: SessionSnapshot) async throws {
+    func unmount(_ snapshot: SessionSnapshot, trace: (DiagnosticEventKind, NSError?) -> Void) async throws {
         let disk = try disk(snapshot.identity)
         let description = DADiskCopyDescription(disk) as? [String: Any]
-        guard description?[kDADiskDescriptionVolumeKindKey as String] as? String == "cd9660" else {
+        guard let path = description?[kDADiskDescriptionVolumePathKey as String] as? URL else {
+            try snapshot.identity.validate()
+            return
+        }
+        guard description?[kDADiskDescriptionVolumeKindKey as String] as? String == "cd9660" ||
+                dm_mount_matches(path.path, snapshot.identity.bsd) == 0 else {
             throw DiscFailure("系统没有将这张光盘识别为 ISO 文件系统。")
         }
-        if description?[kDADiskDescriptionVolumePathKey as String] != nil {
-            try await normalUnmount(disk, options: DADiskUnmountOptions(kDADiskUnmountOptionDefault))
-        }
+        try await normalUnmount(disk, options: DADiskUnmountOptions(kDADiskUnmountOptionDefault), trace: trace)
         try snapshot.identity.validate()
     }
 
-    private func normalUnmount(_ disk: DADisk, options: DADiskUnmountOptions) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let box = Unmanaged.passRetained(MountCallback(continuation)).toOpaque()
-            DADiskUnmount(disk, options, Self.callback, box)
+    private func normalUnmount(_ disk: DADisk, options: DADiskUnmountOptions, trace: (DiagnosticEventKind, NSError?) -> Void) async throws {
+        trace(.unmountRequested, nil)
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let box = Unmanaged.passRetained(MountCallback(continuation)).toOpaque()
+                DADiskUnmount(disk, options, Self.callback, box)
+            }
+        } catch {
+            trace(.unmountReturned, error as NSError)
+            throw error
         }
+        trace(.unmountReturned, nil)
     }
     // The callback owns its context until Disk Arbitration actually completes.
     // A UI warning timer must not free it or start another hardware operation.

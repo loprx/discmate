@@ -502,11 +502,15 @@ enum DiscBurnService {
                         return
                     }
                     let identity = MediaIdentity(bsd: String(cString: bsd), registryID: media.registryID, bytes: media.bytes)
-                    progress(BurnProgress(kind: .finishing, state: "SystemEject", fraction: nil,
+                    progress(BurnProgress(kind: .finishing, state: "EjectPreparation", fraction: nil,
                         detail: "后端已释放，系统仍识别到介质（\(identity.bsd)，\(identity.registryID)）；开始一次正常卸载和推出。"))
                     let service = try DiscEjectService()
-                    try await service.eject(identity, drivePath: drive.path, expectedDriveID: drive.registryID) { detail in
-                        progress(BurnProgress(kind: .finishing, state: "SystemEject", fraction: nil, detail: detail))
+                    try await service.eject(identity, drivePath: drive.path, expectedDriveID: drive.registryID, trace: { event, error in
+                        let code = DiagnosticErrorCode.extract(error: error, backendError: nil).first
+                        progress(BurnProgress(kind: .finishing, state: event.rawValue, fraction: nil, detail: "正在执行系统推出流程。",
+                            errorCode: code?.code, errorSource: code?.source ?? .other, operationEvent: event))
+                    }) { detail in
+                        progress(BurnProgress(kind: .finishing, state: "EjectPreparation", fraction: nil, detail: detail))
                     }
                     progress(BurnProgress(kind: .finishing, state: "EjectConfirmed", fraction: nil, detail: "普通推出及持续介质移除检查通过；请确认实际托盘。"))
                     return

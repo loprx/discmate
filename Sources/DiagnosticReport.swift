@@ -25,7 +25,8 @@ enum DiagnosticEventKind: String, Codable {
     case started, preparing, waiting, writing, verifying, finishing
     case backendDone, backendFailed, backendCancelled
     case deviceUnavailable, deviceAvailable, recoveryRequired
-    case ejectRequested, trayOpenAccepted, ejectCompleted, mediaReturnedDuringCompletion, mountRequested, mountCompleted
+    case unmountRequested, unmountReturned, helperUnmountRequested, helperUnmountReturned, ejectReturned
+    case ejectRequested, trayOpenAccepted, ejectCompleted, mediaReturnedDuringCompletion, mountRequested, mountReused, fullNamesOpened, mountCompleted
     case panelFinished, panelCreationFailed, backendObservationUnavailable, backendReleased, registryObserved, deviceStatusObserved
     case preflightIdentityRejected, preflightCapabilityRejected, preflightUnavailable
     case appendSourcesChecked, appendSourcesRevalidated, appendPreflightRejected
@@ -81,7 +82,7 @@ struct DiagnosticDeviceEvidence: Codable, Equatable, Sendable {
 }
 
 enum DiagnosticFilesystem: String, Codable, Sendable {
-    case iso9660, isoJoliet, isoUdfBridge, isoWithUnknownExtension, udf102, udfOther
+    case iso9660, isoJoliet, isoUdfBridge, isoWithUnknownExtension, udf102, udf201VAT, udfOther
 }
 
 enum DiscWriteState: String, Codable, Sendable {
@@ -344,6 +345,7 @@ struct DiagnosticEvent: Codable {
     let progressPercent: Int?
     let errorCodes: [DiagnosticErrorCode]
     var evidence: DiagnosticEvidence? = nil
+    var unixMilliseconds: Int64? = nil
 }
 
 struct DiagnosticReport: Codable, Identifiable {
@@ -362,6 +364,9 @@ struct DiagnosticReport: Codable, Identifiable {
     var outcome: DiagnosticOutcome
     var events: [DiagnosticEvent]
     var omittedEventCount: Int
+    var usb: USBTaskDiagnostics? = nil
+    var firstAnomaly: DiagnosticEvent? = nil
+    var lastAnomaly: DiagnosticEvent? = nil
     // Completion, device release and readback remain separate event types.
     // Each readback outcome states its scope; absence never implies verification.
 }
@@ -379,11 +384,17 @@ final class DiagnosticReportStore: @unchecked Sendable {
     private let version: String
     private let build: String
     private let osVersion: String
+    private let collectUSB: (USBTaskPort, Date, Date) -> USBTaskDiagnostics
+    private let usbQueue = DispatchQueue(label: "local.discmate.diagnostics.usb", qos: .utility)
+    private var origins: [UUID: TimeInterval] = [:]
+    private var ports: [UUID: USBTaskPort] = [:]
     private var loaded = false
     private var storageFailed = false
     private var history: [DiagnosticReport] = []
 
-    init(directory: URL? = nil, appVersion: String? = nil, appBuild: String? = nil) {
+    init(directory: URL? = nil, appVersion: String? = nil, appBuild: String? = nil,
+         collectUSB: @escaping (USBTaskPort, Date, Date) -> USBTaskDiagnostics = USBTaskDiagnostics.collect) {
+        self.collectUSB = collectUSB
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("DiscMate/Diagnostics", isDirectory: true)
         version = Self.numericVersion(appVersion ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
@@ -395,16 +406,29 @@ final class DiagnosticReportStore: @unchecked Sendable {
     @discardableResult
     func startTask(kind: DiagnosticTaskKind, media: DiagnosticMediaType = .unknown,
                    driveModel: DiagnosticDriveModel = .unknown, fileCount: Int? = nil,
-                   totalBytes: UInt64? = nil) -> UUID {
-        let id = UUID(), now = Date()
+                   totalBytes: UInt64? = nil, drivePath: String? = nil) -> UUID {
+        let id = UUID(), now = Date(), uptime = ProcessInfo.processInfo.systemUptime
         queue.async {
             self.load()
-            let event = DiagnosticEvent(at: now, elapsedSeconds: 0, kind: .started, progressPercent: nil, errorCodes: [])
+            self.origins[id] = uptime
+            let event = DiagnosticEvent(at: now, elapsedSeconds: 0, kind: .started, progressPercent: nil, errorCodes: [], unixMilliseconds: USBTaskDiagnostics.milliseconds(now))
             self.history.insert(DiagnosticReport(schemaVersion: 1, id: id, task: kind,
                 appVersion: self.version, appBuild: self.build, macOSVersion: self.osVersion,
                 startedAt: now, updatedAt: now, media: media, driveModel: driveModel,
                 fileCount: fileCount.flatMap { $0 >= 0 ? $0 : nil }, totalBytes: totalBytes,
                 outcome: .inProgress, events: [event], omittedEventCount: 0), at: 0)
+            if let drivePath {
+                let port = USBTaskPort.resolve(drivePath)
+                self.ports[id] = port
+                self.history[0].usb = USBTaskDiagnostics(topology: port.topology, coverage: .pending)
+            }
+            if drivePath == nil && [.append, .dataBurn, .audioBurn, .videoBurn, .imageBurn, .erase, .closeSession, .eject].contains(kind) {
+                self.history[0].usb = USBTaskDiagnostics(topology: .unknown, coverage: .portUnknown)
+            }
+            if self.history.count > Self.maximumReports, let evicted = self.history.last?.id {
+                self.origins.removeValue(forKey: evicted)
+                self.ports.removeValue(forKey: evicted)
+            }
             self.history = Array(self.history.prefix(Self.maximumReports))
             self.persist()
         }
@@ -419,16 +443,23 @@ final class DiagnosticReportStore: @unchecked Sendable {
         let sense = DiagnosticSense.extract(backendError: backendError)
         let safeEvidence = evidence?.includingSense(sense) ?? sense.map { DiagnosticEvidence(sense: $0) }
         let percent = progress.flatMap { $0.isFinite && (0...1).contains($0) ? Int(($0 * 100).rounded()) : nil }
-        let now = Date()
+        let now = Date(), uptime = ProcessInfo.processInfo.systemUptime
         queue.async {
             self.load()
             guard let index = self.history.firstIndex(where: { $0.id == taskID }) else { return }
             let last = self.history[index].events.last
             if last?.kind == event && last?.progressPercent == percent && last?.errorCodes == codes && last?.evidence == safeEvidence { return }
-            let started = self.history[index].startedAt
-            self.history[index].events.append(DiagnosticEvent(at: now,
-                elapsedSeconds: max(0, now.timeIntervalSince(started)), kind: event,
-                progressPercent: percent, errorCodes: codes, evidence: safeEvidence))
+            let elapsed = self.origins[taskID].map { uptime - $0 } ?? now.timeIntervalSince(self.history[index].startedAt)
+            let observation = DiagnosticEvent(at: now,
+                elapsedSeconds: max(0, elapsed), kind: event,
+                progressPercent: percent, errorCodes: codes, evidence: safeEvidence, unixMilliseconds: USBTaskDiagnostics.milliseconds(now))
+            self.history[index].events.append(observation)
+            let senseWarning = safeEvidence?.sense.map { $0.key != 0 || $0.asc != 0 || $0.ascq != 0 } ?? false
+            if (codes.contains { $0.code != 0 } || senseWarning ||
+                [.backendFailed, .deviceUnavailable, .failed, .recoveryRequired].contains(event)) {
+                if self.history[index].firstAnomaly == nil { self.history[index].firstAnomaly = observation }
+                self.history[index].lastAnomaly = observation
+            }
             self.history[index].updatedAt = now
             while self.history[index].events.count > Self.maximumEvents {
                 let removable = Self.eventToOmit(self.history[index].events)
@@ -471,11 +502,24 @@ final class DiagnosticReportStore: @unchecked Sendable {
     }
 
     func finish(taskID: UUID, outcome: DiagnosticOutcome) {
+        let end = Date()
         queue.async {
             self.load()
             guard let index = self.history.firstIndex(where: { $0.id == taskID }) else { return }
             self.history[index].outcome = outcome
-            self.history[index].updatedAt = Date()
+            self.history[index].updatedAt = end
+            self.origins.removeValue(forKey: taskID)
+            if let port = self.ports.removeValue(forKey: taskID) {
+                let start = self.history[index].startedAt
+                self.usbQueue.async {
+                    let usb = self.collectUSB(port, start, end)
+                    self.queue.async {
+                        guard let i = self.history.firstIndex(where: { $0.id == taskID }) else { return }
+                        self.history[i].usb = usb
+                        self.persist()
+                    }
+                }
+            }
             self.persist()
         }
     }
@@ -533,9 +577,14 @@ final class DiagnosticReportStore: @unchecked Sendable {
                 report.schemaVersion == 1 && report.events.count <= Self.maximumEvents && report.omittedEventCount >= 0 &&
                 (report.fileCount == nil || report.fileCount! >= 0) &&
                 [report.appVersion, report.appBuild, report.macOSVersion].allSatisfy { $0 == "unknown" || Self.numericVersion($0) == $0 } &&
-                report.events.allSatisfy { $0.elapsedSeconds.isFinite && $0.elapsedSeconds >= 0 && ($0.progressPercent == nil || (0...100).contains($0.progressPercent!)) && $0.errorCodes.count <= 2 && ($0.evidence?.isValid ?? true) }
+                (report.usb?.isValid ?? true) &&
+                (report.events + [report.firstAnomaly, report.lastAnomaly].compactMap { $0 }).allSatisfy { $0.elapsedSeconds.isFinite && $0.elapsedSeconds >= 0 && ($0.progressPercent == nil || (0...100).contains($0.progressPercent!)) && $0.errorCodes.count <= 2 && ($0.evidence?.isValid ?? true) }
             }) else { throw DiagnosticExportError.storageUnavailable }
-            history = decoded
+            history = decoded.map { report in
+                var restored = report
+                if restored.usb?.coverage == .pending { restored.usb?.coverage = .interrupted }
+                return restored
+            }
         } catch { storageFailed = true }
     }
 

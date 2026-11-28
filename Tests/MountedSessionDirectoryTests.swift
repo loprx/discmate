@@ -24,6 +24,22 @@ enum MountedSessionDirectoryTests {
         CoreTests.reject("mount path traversal") {
             try MountedSessionDirectory.validate(root: root, entries: ["../escape": .init(name: "escape", lba: 1, bytes: 0, directory: false)])
         }
+        let isoRoot = root.appendingPathComponent("iso")
+        try fm.createDirectory(at: isoRoot, withIntermediateDirectories: false)
+        try Data([42]).write(to: isoRoot.appendingPathComponent("SHORT.ZIP"))
+        let track = RecordedTrack(number: 1, session: 1, start: 0, blocks: 64,
+            blank: false, damaged: false, nextWritable: nil, freeBlocks: 0)
+        let entry = ISOEntry(name: "short.zip", lba: 32, bytes: 1, directory: false)
+        let volume = ISOVolume(root: ISOEntry(name: ".", lba: 20, bytes: 2048, directory: true), joliet: false)
+        var snapshot = SessionSnapshot(identity: .init(bsd: "fixture", registryID: 1, bytes: 64 * 2048),
+            tracks: [track], latest: track, volume: volume, rootEntries: [entry], descriptorHash: "", appendable: false)
+        snapshot.bridge = BridgeSession(partitionStart: 0, files: [entry], primaryIDs: [32: Data("SHORT.ZIP;1".utf8)],
+            isoLabel: "", udfLabel: "")
+        try MountedSessionDirectory.validateISO(root: isoRoot, snapshot: snapshot)
+        try fm.moveItem(at: isoRoot.appendingPathComponent("SHORT.ZIP"), to: isoRoot.appendingPathComponent("OTHER.ZIP"))
+        CoreTests.reject("unrelated primary alias of same size") {
+            try MountedSessionDirectory.validateISO(root: isoRoot, snapshot: snapshot)
+        }
         print("PASS mounted directory: nested/empty/Chinese paths, stale children, size, symlink and unsafe path rejection; metadata only")
     }
 }

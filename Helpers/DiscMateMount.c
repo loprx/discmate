@@ -1,5 +1,6 @@
 #include "../Sources/DeviceBridge.h"
 #include <sys/stat.h>
+#include <sys/mount.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -19,7 +20,7 @@ static int decimal(const char *text, uint64_t *value) {
 static int inputs(int argc, char **argv, uint64_t *identity, uint64_t *start) {
     if (argc != 4 || strncmp(argv[1], "disk", 4) || strlen(argv[1]) > 24) return EINVAL;
     uint64_t index;
-    if (decimal(argv[1] + 4, &index) || decimal(argv[2], identity) || decimal(argv[3], start)) return EINVAL;
+    if (decimal(argv[1] + 4, &index) || decimal(argv[2], identity) || (strcmp(argv[3], "unmount") && decimal(argv[3], start))) return EINVAL;
     return !*identity || *start > INT32_MAX ? EINVAL : 0;
 }
 static int perform(const char *bsd, uint64_t identity, uint32_t expectedStart, char *mountpoint, size_t capacity) {
@@ -41,9 +42,12 @@ static int perform(const char *bsd, uint64_t identity, uint32_t expectedStart, c
         if (track.number != n || (uint64_t)track.start + track.blocks > media.bytes / 2048) { error = EINVAL; goto close_device; }
         if (!track.blank && !(disc.lastState == 0 && track.session == disc.sessions)) latest = track;
     }
-    if (!latest.number || latest.damaged || latest.start != expectedStart || latest.blocks <= 16) { error = ESTALE; goto close_device; }
+    uint32_t directoryStart = 0;
+    error = dm_sealed_iso_start(fd, &disc, &latest, &directoryStart);
+    if (error) goto close_device;
+    if (!latest.number || latest.damaged || directoryStart != expectedStart || latest.blocks <= 16) { error = ESTALE; goto close_device; }
     unsigned char pvd[2048];
-    if (pread(fd, pvd, sizeof(pvd), ((off_t)latest.start + 16) * 2048) != sizeof(pvd)) { error = EIO; goto close_device; }
+    if (pread(fd, pvd, sizeof(pvd), ((off_t)expectedStart + 16) * 2048) != sizeof(pvd)) { error = EIO; goto close_device; }
     if (memcmp(pvd, "\1CD001\1", 7) || memcmp(pvd + 128, "\0\10\10\0", 4)) { error = EINVAL; goto close_device; }
 close_device:
     close(fd);
@@ -57,7 +61,7 @@ close_device:
     DMMedia current = {0};
     error = dm_media(bsd, &current);
     if (error || current.registryID != identity) { rmdir(mountpoint); return error ? error : ESTALE; }
-    char sector[16]; snprintf(sector, sizeof(sector), "%u", latest.start);
+    char sector[16]; snprintf(sector, sizeof(sector), "%u", expectedStart);
     pid_t child = fork();
     if (child < 0) { error = errno; rmdir(mountpoint); return error; }
     if (!child) {
@@ -71,12 +75,29 @@ close_device:
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) { rmdir(mountpoint); return EIO; }
     return dm_mount_matches(mountpoint, bsd);
 }
+static int unmount_session(const char *bsd, uint64_t identity) {
+    DMMedia media = {0};
+    char path[1024];
+    int error = dm_session_mount_for_eject(bsd, path, sizeof(path));
+    if (error == ENOENT) return 0;
+    if (error) return error;
+    struct statfs fs;
+    if (statfs(path, &fs)) return errno;
+    if (strcmp(fs.f_mntonname, path)) return ESTALE;
+    if ((error = dm_mount_matches(path, bsd)) || (error = dm_media(bsd, &media))) return error;
+    if (media.registryID != identity) return ESTALE;
+    if (unmount(path, 0)) return errno;
+    // rmdir only removes an empty mountpoint, never its contents.
+    rmdir(path);
+    return 0;
+}
 int main(int argc, char **argv) {
     uint64_t identity = 0, start = 0;
     int error = inputs(argc, argv, &identity, &start);
     if (!error && geteuid() != 0) error = EPERM;
     char mountpoint[128] = {0};
-    if (!error) error = perform(argv[1], identity, (uint32_t)start, mountpoint, sizeof(mountpoint));
+    if (!error && !strcmp(argv[3], "unmount")) error = unmount_session(argv[1], identity);
+    else if (!error) error = perform(argv[1], identity, (uint32_t)start, mountpoint, sizeof(mountpoint));
     if (error) { printf("ERROR\t%d\t%s\n", error, strerror(error)); return 1; }
     printf("OK\t%s\n", mountpoint);
     return 0;

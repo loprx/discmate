@@ -12,11 +12,14 @@ xcrun clang -Wall -Wextra -Werror -isysroot "$sdk_path" -target arm64-apple-maco
 xcrun clang -Wall -Wextra -Werror -isysroot "$sdk_path" -target arm64-apple-macos13 \
   "$project_dir/Tests/ReservedTrackTests.c" "$test_dir/bridge.o" -framework IOKit -framework CoreFoundation -o "$test_dir/reserved-tests"
 "$test_dir/reserved-tests"
+xcrun clang -Wall -Wextra -Werror -isysroot "$sdk_path" -target arm64-apple-macos13 \
+  "$project_dir/Tests/SealedDirectoryTests.c" "$test_dir/bridge.o" -framework IOKit -framework CoreFoundation -o "$test_dir/sealed-tests"
+"$test_dir/sealed-tests"
 CLANG_MODULE_CACHE_PATH=/tmp/discmate-clang-cache SDKROOT="$sdk_path" \
 xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   -import-objc-header "$project_dir/Sources/DeviceBridge.h" \
   "$project_dir/Sources/ISO9660.swift" "$project_dir/Sources/DVDSessionReader.swift" \
-  "$project_dir/Sources/PureUDFSession.swift" "$project_dir/Sources/UDFEncoding.swift" "$project_dir/Sources/BridgeSession.swift" "$project_dir/Sources/HybridUDF.swift" "$project_dir/Sources/UDFVolumeProbe.swift" "$project_dir/Sources/UDFDirectoryReader.swift" "$project_dir/Sources/UDFIncremental.swift" "$project_dir/Tests/UDFVolumeProbeTests.swift" \
+  "$project_dir/Sources/VATSession.swift" "$project_dir/Sources/PureUDFSession.swift" "$project_dir/Sources/UDFEncoding.swift" "$project_dir/Sources/BridgeSession.swift" "$project_dir/Sources/HybridUDF.swift" "$project_dir/Sources/UDFVolumeProbe.swift" "$project_dir/Sources/UDFDirectoryReader.swift" "$project_dir/Sources/UDFIncremental.swift" "$project_dir/Tests/UDFVolumeProbeTests.swift" \
   "$project_dir/Sources/RecordedDirectoryTree.swift" "$project_dir/Tests/RecordedDirectoryTreeTests.swift" \
   "$project_dir/Sources/MountedSessionDirectory.swift" "$project_dir/Tests/MountedSessionDirectoryTests.swift" \
   "$project_dir/Sources/TestAppendService.swift" "$project_dir/Tests/CoreTests.swift" \
@@ -30,7 +33,7 @@ xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   "$project_dir/Sources/BurnSpeed.swift" "$project_dir/Tests/BurnSpeedTests.swift" \
   "$project_dir/Sources/DeviceChangeObserver.swift" "$project_dir/Tests/DeviceChangeObserverTests.swift" \
   "$project_dir/Sources/DiscWriteState.swift" "$project_dir/Tests/DiscWriteStateTests.swift" \
-  "$project_dir/Sources/DiagnosticReport.swift" "$project_dir/Tests/DiagnosticReportTests.swift" \
+  "$project_dir/Sources/USBTaskDiagnostics.swift" "$project_dir/Sources/DiagnosticReport.swift" "$project_dir/Tests/DiagnosticReportTests.swift" \
   "$project_dir/Sources/SoftwareUpdate.swift" "$project_dir/Tests/SoftwareUpdateTests.swift" \
   "$project_dir/Sources/DiagnosticPreview.swift" "$project_dir/Tests/DiagnosticPreviewTests.swift" \
   "$project_dir/Tests/DiagnosticPreviewFixture.swift" \
@@ -38,7 +41,7 @@ xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos13 \
   "$project_dir/Sources/BurnCompletion.swift" "$project_dir/Tests/BurnCompletionTests.swift" \
   "$project_dir/Sources/DeviceRecovery.swift" "$project_dir/Sources/SessionDeviceCache.swift" "$project_dir/Tests/DeviceRecoveryTests.swift" \
   "$project_dir/Sources/BurnTaskArchive.swift" \
-  "$project_dir/Sources/IncrementalISO.swift" "$project_dir/Tests/IncrementalISOTests.swift" \
+  "$project_dir/Sources/AppendImageFormat.swift" "$project_dir/Sources/AppendImagePreparation.swift" "$project_dir/Sources/IncrementalISO.swift" "$project_dir/Tests/IncrementalISOTests.swift" \
   "$project_dir/Tests/FolderIntegrationTests.swift" \
   "$project_dir/Sources/ISOTrackLayout.swift" \
   "$test_dir/bridge.o" -framework AppKit -framework IOKit -framework DiskArbitration -framework DiscRecording -o "$test_dir/core-tests"

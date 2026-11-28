@@ -6,6 +6,11 @@ struct CoreTests {
         do { try body(); fatalError("Expected rejection: \(name)") } catch { print("PASS reject \(name)") }
     }
     static func main() async throws {
+        if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--replay-vat" {
+            try FolderIntegrationTests.replayVAT(URL(fileURLWithPath: CommandLine.arguments[2]),
+                                                 output: URL(fileURLWithPath: CommandLine.arguments[3]))
+            return
+        }
         SystemTaskProgressTests.run()
         try BurnSpeedTests.run()
         DeviceChangeObserverTests.run()

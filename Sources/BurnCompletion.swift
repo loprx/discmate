@@ -138,7 +138,10 @@ struct BurnProgress: Sendable {
     var evidence: DiagnosticEvidence? = nil
     var errorSource: DiagnosticErrorCode.Source = .discRecording
 
+    var operationEvent: DiagnosticEventKind? = nil
+
     var diagnosticEventKind: DiagnosticEventKind {
+        if let operationEvent { return operationEvent }
         switch state {
         case DRStatusStateTrackWrite: return .writing
         case DRStatusStateVerifying: return .verifying

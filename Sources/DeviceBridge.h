@@ -8,8 +8,11 @@ typedef struct { uint32_t status, lastState, sessions, firstTrack, lastTrack; } 
 typedef struct { uint32_t number, session, start, blocks, blank, damaged, nwaValid, nwa, freeBlocks; } DMTrack;
 typedef struct { uint32_t lenovoUSBDevices, opticalPeripherals, dvdMedia; } DMOpticalRegistryProbe;
 int dm_media(const char *bsd, DMMedia *result);
+int dm_sealed_iso_start(int fd, const DMDisc *disc, const DMTrack *track, uint32_t *start);
 int dm_disc(int fd, DMDisc *result);
 int dm_track(int fd, uint32_t number, DMTrack *result);
+int dm_session_mount_for_eject(const char *bsd, char *path, size_t capacity);
+int dm_existing_iso_mount(const char *bsd, uint32_t rootLBA, char *path, size_t capacity);
 int dm_mount_matches(const char *path, const char *bsd);
 int dm_udf_mount_matches(const char *path, const char *bsd);
 int dm_registry_identity(const char *path, uint64_t *identity);

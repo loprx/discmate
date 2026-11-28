@@ -2,6 +2,7 @@ import AppKit
 import DiscRecording
 import DiscRecordingUI
 import SwiftUI
+import IOKit
 
 @main
 struct DiscMateApp: App {
@@ -68,7 +69,7 @@ private struct DiscMateTaskCommands: Commands {
 
 /// One refresh result per drive; never combine fields from different indexes.
 private struct DriveInventoryEntry: @unchecked Sendable {
-    let device: DRDevice
+    let device: DRDevice?
     let description: String
     let name: String
     let bsd: String?
@@ -137,6 +138,7 @@ struct ContentView: View {
         guard !isRefreshing, !deviceChanges.inventoryPending, !sessions.needsDeviceRecovery else { return .unknown }
         if nativeTask.isBusy || sessions.isBusy { return .busy }
         guard let entry = selectedEntry else { return .unknown }
+        if entry.device == nil { return .readOnly }
         if job == .data || job == .info {
             let snapshot = sessions.snapshot.flatMap { $0.identity.bsd == entry.bsd ? $0 : nil }
             return entry.writeState.forDataAppend(type: entry.mediaType, freeBlocks: entry.freeBlocks,
@@ -191,7 +193,7 @@ struct ContentView: View {
                 Picker("任务", selection: $job) {
                     ForEach(Job.allCases) { task in Text(task.rawValue).tag(task) }
                 }.pickerStyle(.segmented).disabled(locked)
-                    .help("DVD+R 可追加 ISO 9660、Joliet、单物理分区 UDF 1.02，以及经双目录核对的 ISO/UDF 1.02 根目录普通文件。查看摘要会复核当前盘片。")
+                    .help("DVD+R 可追加 ISO 9660、Joliet、单物理分区 UDF 1.02，经双目录核对的 ISO/UDF 1.02 根目录普通文件，以及受限的 UDF 2.01 VAT 根目录小文件。查看摘要会复核当前盘片。")
 
                 HStack {
                     Picker("刻录机", selection: $selectedDrive) {
@@ -392,7 +394,7 @@ struct ContentView: View {
                                         .font(.caption)
                                 }
                                 if sessions.snapshot?.udf != nil {
-                                    Text("新增会话沿用 UDF 1.02 格式和卷名，旧文件仍从原位置读取。")
+                                    Text(sessions.snapshot?.vat == nil ? "新增会话沿用 UDF 1.02 格式和卷名，旧文件仍从原位置读取。" : "新增会话沿用 UDF 2.01 虚拟分配表，保留旧文件位置。此布局目前支持一次追加一个最多 1 MiB 的根目录文件，实盘写入待验证。")
                                         .font(.caption)
                                 }
                                 if sessions.snapshot?.primaryImportVerified == true {
@@ -590,7 +592,32 @@ struct ContentView: View {
         let registry: DMOpticalRegistryProbe
         let registryCode: Int32
     }
+    // DiscRecording can omit a connected reader even while its DVD media
+    // is published and readable. Such entries have no write backend.
+    private nonisolated static func readOnlyDVDs() -> [DriveInventoryEntry] {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IODVDMedia"), &iterator) == KERN_SUCCESS else { return [] }
+        defer { IOObjectRelease(iterator) }
+        var result: [DriveInventoryEntry] = []
+        while case let media = IOIteratorNext(iterator), media != 0 {
+            defer { IOObjectRelease(media) }
+            var id: UInt64 = 0
+            guard IORegistryEntryGetRegistryEntryID(media, &id) == KERN_SUCCESS,
+                  let bsd = IORegistryEntryCreateCFProperty(media, "BSD Name" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String,
+                  let identity = try? MediaIdentity.current(bsd), identity.registryID == id,
+                  FileManager.default.isReadableFile(atPath: "/dev/r" + bsd) else { continue }
+            result.append(DriveInventoryEntry(device: nil, description: "系统已识别 DVD+R，可只读浏览。",
+                name: "DVD+R（只读 · " + bsd + "）", bsd: bsd, path: nil, present: true, blank: false,
+                writeState: .readOnly, mediaType: DRDeviceMediaTypeDVDPlusR, freeBlocks: nil, media: .dvdPlusR, speeds: []))
+        }
+        return result
+    }
+
     private func requestManualRefresh() {
+        if let active = sessions.diagnosticTaskID ?? nativeTask.taskID {
+            DiagnosticReportStore.shared.record(taskID: active, event: .refreshRequested,
+                evidence: DiagnosticEvidence(refresh: DiagnosticRefreshEvidence(source: .manual, deferredByTask: true)))
+        }
         if let id = manualRefreshRequestID {
             DiagnosticReportStore.shared.record(taskID: id, event: .refreshCoalesced)
         } else {
@@ -665,7 +692,7 @@ struct ContentView: View {
                 }
                 var registry = DMOpticalRegistryProbe()
                 let registryCode = dm_registry_optical_probe(&registry)
-                return Inventory(entries: entries, registry: registry, registryCode: registryCode)
+                return Inventory(entries: entries.isEmpty ? Self.readOnlyDVDs() : entries, registry: registry, registryCode: registryCode)
             }.value
             inventory = result.entries
             if let selectedPath, let index = result.entries.firstIndex(where: { $0.path == selectedPath }) {
@@ -682,7 +709,7 @@ struct ContentView: View {
             if result.registryCode == 0 {
                 DiagnosticReportStore.shared.record(taskID: diagnosticID, event: .registryObserved,
                     evidence: DiagnosticEvidence(opticalRegistry: DiagnosticOpticalRegistryEvidence(
-                        discRecordingDevices: inventory.count,
+                        discRecordingDevices: inventory.filter { $0.device != nil }.count,
                         lenovoUSBDevices: Int(result.registry.lenovoUSBDevices),
                         opticalPeripherals: Int(result.registry.opticalPeripherals),
                         dvdMedia: Int(result.registry.dvdMedia))))
@@ -697,6 +724,9 @@ struct ContentView: View {
             DiagnosticReportStore.shared.finish(taskID: diagnosticID, outcome: .completed)
             status = inventory.isEmpty ? "未检测到刻录机。" : "已检测到 \(inventory.count) 台刻录机。"
             refreshTask = nil
+            if !manualRefreshPending, let entry = selectedEntry, entry.device == nil, let bsd = entry.bsd {
+                sessions.inspect(bsd: bsd)
+            }
             drainManualRefresh()
         }
     }

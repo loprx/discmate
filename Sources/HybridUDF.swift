@@ -139,17 +139,32 @@ enum HybridUDF: UDFEncoding {
                     try patch(base + dataBlock + index, directory.subdata(in: offset..<(offset + 2048)))
                 }
             }
+            var crcLength: Int?
             if !node.directory, let old = references[base + dataBlock] {
-                guard old.lba >= partitionStart, old.bytes < 0x4000_0000,
+                guard old.lba >= partitionStart, old.bytes > 0,
+                      UInt64(old.lba) + (UInt64(old.bytes) + 2047) / 2048 <= UInt64(start),
                       preserved.insert(old.lba).inserted else { throw unsupported }
-                put32(&fe, ad + 4, old.lba - partitionStart)
-                put32(&fe, ad, old.bytes)
+                // The top two length bits are extent flags. Split before they
+                // are reached, on a whole logical block.
+                let maxChunk: UInt32 = 0x3fff_f800
+                var remaining = old.bytes, position = old.lba - partitionStart, cursor = ad
+                while remaining > 0 {
+                    guard cursor + 8 <= fe.count else { throw unsupported }
+                    let chunk = min(remaining, maxChunk)
+                    put32(&fe, cursor, chunk)
+                    put32(&fe, cursor + 4, position)
+                    remaining -= chunk
+                    if remaining > 0 { position += chunk / 2048 }
+                    cursor += 8
+                }
+                put32(&fe, 172, UInt32(cursor - ad))
+                crcLength = max(Int(get16(fe, 10)), cursor - 16)
                 put64(&fe, 56, UInt64(old.bytes))
                 put64(&fe, 64, (UInt64(old.bytes) + 2047) / 2048)
             } else {
                 put32(&fe, ad + 4, try relative(dataBlock))
             }
-            retag(&fe, location: location)
+            retag(&fe, location: location, crcLength: crcLength)
             try patch(base + block, fe)
         }
         guard preserved == Set(references.values.map(\.lba)) else { throw unsupported }

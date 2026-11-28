@@ -42,6 +42,22 @@ enum FolderIntegrationTests {
         }
         try fm.createDirectory(at: sources.appendingPathComponent("Documents/new-empty"), withIntermediateDirectories: true)
         try fm.createDirectory(at: sources.appendingPathComponent("资料/空目录"), withIntermediateDirectories: true)
+        // A new author cannot bypass the common capacity/alignment checks.
+        struct InvalidImageFormat: AppendImageFormat {
+            func validate(_ sources: AppendSourceTree, oldFiles: [ISOEntry]) throws {}
+            func author(_ context: AppendImageContext, proof: inout AppendProof) throws {
+                try Data([0]).write(to: context.image)
+            }
+        }
+        let rejected = root.appendingPathComponent("invalid-author")
+        do {
+            _ = try AppendImagePreparation.build(snapshot: initial, verified: [],
+                sources: [sources.appendingPathComponent("Documents")], directory: rejected,
+                selectFormat: { _ in InvalidImageFormat() })
+            preconditionFailure("unaligned image accepted from a replacement author")
+        } catch let failure as AppendPreflightFailure {
+            precondition(failure.reason == .capacity && !fm.fileExists(atPath: rejected.path))
+        }
         let prepared = try IncrementalISO.build(snapshot: initial, verified: [],
             sources: [sources.appendingPathComponent("Documents"), sources.appendingPathComponent("资料")],
             directory: root.appendingPathComponent("prepared-one"))
@@ -165,6 +181,16 @@ enum FolderIntegrationTests {
         let rootOffset = Int(try ISO9660.both32(original, 16 * 2048 + 158)) * 2048
         let parent = rootOffset + Int(original[rootOffset])
         let record = parent + Int(original[parent])
+        // Some bridge discs declare the actual directory length in the PVD.
+        // Non-directory bytes after that boundary must not become ISO records.
+        let used = UInt32(record - rootOffset + Int(original[record]))
+        for i in 0..<4 {
+            original[16*2048 + 166 + i] = UInt8(truncatingIfNeeded: used >> (8*i))
+            original[16*2048 + 170 + i] = UInt8(truncatingIfNeeded: used >> (8*(3-i)))
+        }
+        original[rootOffset + Int(used)] = 1
+        let identifier = Data("BRIDGE".utf8) + Data([0, 1]) + Data(repeating: 0, count: 24)
+        original.replaceSubrange(16*2048+40..<16*2048+72, with: identifier)
         original[record + 33] = 88
         try original.write(to: bridge)
         let importedBridge = try snapshot(bridge, recorded: [bridgeTrack])
@@ -199,6 +225,7 @@ enum FolderIntegrationTests {
             try hybridPlan.proof.validateDirectory(missingUDF)
             fatalError("Missing UDF namespace passed bridge readback")
         } catch is DiscFailure {}
+        precondition(resultBridge.bridge?.rawISOIdentifier == identifier)
         precondition(resultBridge.bridge?.primaryIDs[isoFile.lba] == importedBridge.bridge?.primaryIDs[isoFile.lba])
         precondition(resultBridge.bridge?.files.contains(where: { $0.name == unicodeName && $0.lba == isoFile.lba }) == true)
         try assertExtract(combinedBridge, expected: [unicodeName: FileProof.capture(new), added.lastPathComponent: FileProof.capture(added)],
@@ -321,6 +348,59 @@ enum FolderIntegrationTests {
         let source = try Data(contentsOf: added)
         precondition(combined[at..<(at + Int(newFile.bytes))] == source)
         print("PASS pure UDF append: old files=\(original.fileEntries.count), directories=\(original.directoryPaths.count), new bytes=\(source.count), old extents and all bytes matched")
+    }
+
+    // Optional replay of the four-track November VAT sample. Both arguments
+    // are local files; optical devices are never accepted by this test.
+    static func replayVAT(_ image: URL, output: URL) throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: image.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              (attributes[.size] as? NSNumber)?.intValue == 73712*2048 else {
+            throw DiscFailure("需要对应四会话样本的普通镜像文件。")
+        }
+        let layout: [(UInt32, UInt32)] = [(0,65264),(67312,304),(69664,1696),(73408,304)]
+        var tracks = layout.enumerated().map { index, span in
+            RecordedTrack(number: UInt32(index+1), session: UInt32(index+1), start: span.0, blocks: span.1,
+                          blank:false, damaged:false, nextWritable:nil, freeBlocks:0)
+        }
+        let before = try snapshot(image, recorded: tracks)
+        precondition(before.vat != nil && before.fileEntries.count == 5 && before.appendState == .appendReady)
+        let vat = before.vat!
+        for damageTail in [true, false] {
+            do {
+                _ = try VATSession.inspect(volume: vat.volume, latest: before.latest, tracks: tracks) { sector in
+                    guard var block = vat.metadata[sector] else { throw DiscFailure("missing test metadata") }
+                    if sector == vat.tail {
+                        if damageTail { block[4] ^= 1 }
+                        else {
+                            VATSession.put32(&block, vat.tableOffset + Int(vat.rootIndex)*4, UInt32.max)
+                            VATSession.retag(&block, location: vat.tail-vat.volume.partitionStart)
+                        }
+                    }
+                    return block
+                }
+                fatalError("Damaged VAT or unmapped root accepted")
+            } catch {}
+        }
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:temp, withIntermediateDirectories:false)
+        defer { try? FileManager.default.removeItem(at:temp) }
+        let sample = temp.appendingPathComponent("VAT追加.txt")
+        try Data("DiscMate VAT offline readback\n".utf8).write(to:sample)
+        let plan = try IncrementalISO.build(snapshot:before, verified:[], sources:[sample],
+                                            directory:temp.appendingPathComponent("task"))
+        _ = try ISOTrackLayout.load(plan.image, bytes: plan.imageBytes)
+        try combine(old:image,prepared:plan,into:output)
+        let blocks = UInt32(try size(plan.image)/2048)
+        tracks.append(.init(number:5,session:5,start:plan.proof.expectedStart,blocks:blocks,blank:false,
+                            damaged:false,nextWritable:nil,freeBlocks:0))
+        let after = try snapshot(output,recorded:tracks)
+        try plan.proof.validateDirectory(after)
+        precondition(after.vat != nil && after.fileEntries.count == 6)
+        for saved in before.fileEntries {
+            precondition(after.fileEntries.contains(saved))
+        }
+        print("PASS VAT append: five original extents preserved, sixth file imported from next session")
     }
 
     private static func snapshot(_ image: URL, recorded: [RecordedTrack]) throws -> SessionSnapshot {

@@ -50,6 +50,9 @@ struct DiagnosticsView: View {
                     Button("下一页") { pageIndex += 1 }.disabled(pageIndex + 1 >= preview.pages.count)
                     Spacer()
                 }
+                if let usb = reports.first(where: { $0.id == selectedID })?.usb {
+                    Text(usbStatus(usb)).font(.caption).foregroundStyle(.secondary)
+                }
                 FloatingScrollView([.vertical, .horizontal]) {
                     Text(preview.pages[pageIndex]).font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(10)
@@ -77,6 +80,18 @@ struct DiagnosticsView: View {
         .task { await reload() }
         .task(id: PreviewKey(id: selectedID, revision: revision)) { await updatePreview() }
         .onDisappear { request.begin(taskID: nil) }
+    }
+
+    private func usbStatus(_ usb: USBTaskDiagnostics) -> String {
+        switch usb.coverage {
+        case .pending: return "任务结束后会汇总 USB 日志，可点「刷新记录」查看结果。"
+        case .portUnknown: return "未能确认这台光驱的 USB 端口。"
+        case .unavailable: return "未能读取系统 USB 日志，连接状态未知。"
+        case .noMatchingVisibleEvents: return "可读取的系统日志中没有匹配此光驱端口的事件。"
+        case .interrupted: return "上次运行结束时，USB 日志尚未汇总完成。"
+        case .truncated: return "USB 日志已达保留上限，报告仅包含部分事件。"
+        case .observed: return "已记录该光驱端口的 USB 事件。系统日志无法测量光驱电压。"
+        }
     }
 
     private struct PreviewKey: Equatable { let id: UUID?; let revision: UUID }

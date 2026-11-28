@@ -42,15 +42,16 @@ struct SessionSnapshot: Sendable {
     var volumeExtension: ISOVolumeExtension = .none
     var bridge: BridgeSession? = nil
     var udf: UDFVolumeProbe? = nil
+    var vat: VATSession? = nil
     var filesystemLabel: String {
-        if udf != nil { return "UDF 1.02" }
+        if udf != nil { return vat == nil ? "UDF 1.02" : "UDF 2.01 VAT" }
         if hasUDFRecognition { return "ISO/UDF" }
         return volume?.joliet == true ? "ISO/Joliet" : "ISO"
     }
     var hasUDFRecognition: Bool { volumeExtension == .udf }
     var importableISO: Bool { volumeExtension == .none && (volume?.joliet == true || primaryImportVerified) }
     var filesystem: DiagnosticFilesystem {
-        if udf != nil { return .udf102 }
+        if udf != nil { return vat == nil ? .udf102 : .udf201VAT }
         switch volumeExtension {
         case .udf: return .isoUdfBridge
         case .unrecognized: return .isoWithUnknownExtension
@@ -154,7 +155,22 @@ final class DVDSessionReader {
         }
         let readable = try ISO9660.readableTracks(tracks, lastState: disc.lastState)
         let latest = try ISO9660.latestCompleted(readable, emptyLastSession: disc.lastState == 0 ? disc.sessions : nil)
-        let snapshot = try Self.scanSession(identity: identity, tracks: readable, latest: latest,
+        var directoryTrack = latest
+        if disc.status == 2 {
+            var track = DMTrack()
+            track.start = latest.start
+            track.blocks = latest.blocks
+            track.blank = latest.blank ? 1 : 0
+            track.damaged = latest.damaged ? 1 : 0
+            var start = latest.start
+            try checkSystem(dm_sealed_iso_start(fd, &disc, &track, &start), "复核封盘目录锚点")
+            if start != latest.start {
+                directoryTrack = RecordedTrack(number: latest.number, session: latest.session, start: start,
+                    blocks: latest.blocks - (start - latest.start), blank: false, damaged: false,
+                    nextWritable: nil, freeBlocks: 0)
+            }
+        }
+        let snapshot = try Self.scanSession(identity: identity, tracks: readable, latest: directoryTrack,
             discStatus: disc.status, lastState: disc.lastState, read: read(lba:bytes:tracks:))
         try preflight()
         return snapshot
@@ -167,32 +183,43 @@ final class DVDSessionReader {
         var plainRecords = true
         var bridgeDescriptorsSupported = true
         var primaryLabel = ""
+        var rawISOIdentifier: Data?
         var volumeExtension = ISOVolumeExtension.none
         for offset: UInt32 in 16..<48 {
             let position = UInt64(latest.start) + UInt64(offset)
             guard position <= UInt32.max else { throw DiscFailure("卷描述符地址溢出。") }
             let data = try read(UInt32(position), 2048, [latest])
             if offset == 16 && data.subdata(in: 1..<6) == Data("BEA01".utf8) {
+                // Recognition and the anchor belong to this session. The anchor's
+                // absolute descriptor sequence may reside in an earlier session.
+                guard latest.contains(latest.start + 16, bytes: 4096),
+                      let anchor = UInt32(exactly: UInt64(latest.start) + 256),
+                      latest.contains(anchor, bytes: 2048) else {
+                    throw DiscFailure("UDF 会话未包含完整识别序列或锚点。")
+                }
+                let recorded = readable.filter { $0.session <= latest.session }
                 var cache: [UInt32: Data] = [:]
                 func metadata(_ address: UInt32) throws -> Data {
                     if let data = cache[address] { return data }
                     guard cache.count < 16_384 else { throw DiscFailure("UDF 目录元数据超过 32 MiB。") }
-                    let data = try read(address, 2048, [latest])
+                    let data = try read(address, 2048, recorded)
                     cache[address] = data
                     return data
                 }
                 let capacity = identity.bytes / 2048
-                let udf = try UDFVolumeProbe.inspect(sessionStart: latest.start, capacityBlocks: capacity, readSector: metadata)
+                let udf = try UDFVolumeProbe.inspect(sessionStart: latest.start, capacityBlocks: capacity, allowVAT: true, readSector: metadata)
                 let unsupported = UDFAppendUnsupported(revision: udf.revision, partitionMapType: udf.partitionMapType)
-                guard udf.revision == 0x0102, udf.partitionNumber == 0, udf.label?.isEmpty == false,
+                guard (udf.partitionMapType == 2 || (udf.revision == 0x0102 && udf.partitionNumber == 0)), udf.label?.isEmpty == false,
                       lastState != 1 else { throw unsupported }
-                let tree = try udf.importTree(capacity: capacity, tracks: readable, read: metadata)
+                var vat = try udf.partitionMapType == 2 ? VATSession.inspect(volume: udf, latest: latest, tracks: recorded, read: metadata) : nil
+                vat?.metadata = cache
+                let tree = try vat?.entries ?? udf.importTree(capacity: capacity, tracks: readable, read: metadata)
                 var digest = SHA256()
                 for address in cache.keys.sorted() { digest.update(data: cache[address]!) }
                 return SessionSnapshot(identity: identity, tracks: readable, latest: latest, volume: nil,
                     rootEntries: tree.filter { !$0.name.contains("/") },
                     descriptorHash: digest.finalize().map { String(format: "%02x", $0) }.joined(),
-                    appendable: discStatus == 1, recordedEntries: tree, udf: udf)
+                    appendable: discStatus == 1, recordedEntries: tree, udf: udf, vat: vat)
             }
             let volume = try ISO9660.descriptor(data)
             descriptors.append(data)
@@ -201,7 +228,14 @@ final class DVDSessionReader {
                 else {
                     if primary != nil { plainRecords = false; bridgeDescriptorsSupported = false }
                     primary = volume
-                    primaryLabel = String(decoding: data[40..<72], as: UTF8.self).trimmingCharacters(in: CharacterSet(charactersIn: " \0"))
+                    let identifier = data[40..<72]
+                    let name = identifier.prefix { $0 != 0 }
+                    primaryLabel = String(decoding: name, as: UTF8.self).trimmingCharacters(in: .whitespaces)
+                    if name.count < identifier.count {
+                        // Some writers store binary padding after the terminated volume name.
+                        // Pass only the name to hdiutil and retain the full original PVD field.
+                        rawISOIdentifier = Data(identifier)
+                    }
                 }
             }
             if data[0] == 255 {
@@ -248,6 +282,7 @@ final class DVDSessionReader {
                 return data
             }
         }
+        bridge?.rawISOIdentifier = rawISOIdentifier
         return SessionSnapshot(identity: identity, tracks: readable, latest: latest, volume: volume, rootEntries: entries,
                                descriptorHash: hash(descriptors), appendable: discStatus == 1 && lastState != 1,
                                incompleteSession: lastState == 1, recordedEntries: tree,

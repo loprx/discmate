@@ -7,11 +7,57 @@
 #include <libkern/OSByteOrder.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/stat.h>
+#include <stdlib.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <limits.h>
 #include <stdbool.h>
+
+#include <unistd.h>
+
+static int read_sector(int fd, uint32_t sector, unsigned char *data) {
+    ssize_t count = pread(fd, data, 2048, (off_t)sector * 2048);
+    return count < 0 ? errno : count == 2048 ? 0 : EIO;
+}
+
+// Some finalized single-track DVDs retain an earlier volume at LBA 0.
+// Their terminal UDF anchor uses a session-relative tag location, while
+// the corresponding primary anchor uses its absolute physical location.
+static bool valid_anchor(const unsigned char *data) {
+    if (OSReadLittleInt16(data, 0) != 2 || OSReadLittleInt16(data, 10) != 496) return false;
+    unsigned sum = 0;
+    for (unsigned i = 0; i < 16; ++i) if (i != 4) sum += data[i];
+    uint16_t crc = 0;
+    for (unsigned i = 16; i < 512; ++i) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (unsigned j = 0; j < 8; ++j)
+            crc = (uint16_t)((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0));
+    }
+    return (sum & 255) == data[4] && crc == OSReadLittleInt16(data, 8);
+}
+
+int dm_sealed_iso_start(int fd, const DMDisc *disc, const DMTrack *track, uint32_t *start) {
+    *start = track->start;
+    if (disc->status != 2 || disc->lastState != 3 || disc->sessions != 1 ||
+        disc->lastTrack != 1 || track->start || track->blank || track->damaged || track->blocks <= 257) return 0;
+    unsigned char sector[2048], tail[2048];
+    int error = read_sector(fd, 16, sector);
+    if (error || memcmp(sector + 1, "BEA01", 5)) return error;
+    uint32_t last = track->blocks - 1;
+    error = read_sector(fd, last, tail);
+    if (error || !valid_anchor(tail)) return error;
+    uint32_t relative = OSReadLittleInt32(tail, 12);
+    if (relative <= 256 || relative >= last) return 0;
+    uint32_t candidate = last - relative;
+    error = read_sector(fd, candidate + 256, sector);
+    if (error || !valid_anchor(sector) || OSReadLittleInt32(sector, 12) != candidate + 256 ||
+        memcmp(sector + 16, tail + 16, 16)) return error;
+    error = read_sector(fd, candidate + 16, sector);
+    if (!error && !memcmp(sector, "\1CD001\1", 7)) *start = candidate;
+    return error;
+}
 
 // This bridge has no write, erase, eject, or arbitrary ioctl entry point.
 int dm_registry_identity(const char *path, uint64_t *identity) {
@@ -208,6 +254,51 @@ static int dm_mount_matches_type(const char *path, const char *bsd, const char *
     char expected[64];
     if (snprintf(expected, sizeof(expected), "/dev/%s", bsd) >= (int)sizeof(expected)) return EINVAL;
     return strcmp(fs.f_mntfromname, expected) || strcmp(fs.f_fstypename, filesystem) || !(fs.f_flags & MNT_RDONLY) ? EINVAL : 0;
+}
+// An explicit mount_cd9660 mount may survive a successful DA whole-unmount.
+int dm_session_mount_for_eject(const char *bsd, char *path, size_t capacity) {
+    char source[64];
+    if (snprintf(source, sizeof(source), "/dev/%s", bsd) >= (int)sizeof(source)) return EINVAL;
+    struct statfs *mounts = NULL;
+    int count = getmntinfo_r_np(&mounts, MNT_NOWAIT);
+    if (!count) return errno ? errno : EIO;
+    int result = ENOENT;
+    const char *prefix = "/Volumes/DiscMate-Session-";
+    for (int i = 0; i < count; i++) {
+        const struct statfs *m = &mounts[i];
+        if (strcmp(source, m->f_mntfromname)) continue;
+        if (result != ENOENT || strcmp(m->f_fstypename, "cd9660") ||
+            !(m->f_flags & MNT_RDONLY) || strncmp(m->f_mntonname, prefix, strlen(prefix)) ||
+            strchr(m->f_mntonname + strlen(prefix), '/')) { result = EBUSY; break; }
+        result = strlcpy(path, m->f_mntonname, capacity) < capacity ? 0 : ENAMETOOLONG;
+    }
+    free(mounts);
+    return result;
+}
+
+// cd9660 identifies a directory by the byte offset of its extent. Check
+// the root inode as well as the device: different sessions can share names.
+int dm_existing_iso_mount(const char *bsd, uint32_t rootLBA, char *path, size_t capacity) {
+    char source[64];
+    if (snprintf(source, sizeof(source), "/dev/%s", bsd) >= (int)sizeof(source)) return EINVAL;
+    struct statfs *mounts = NULL;
+    int count = getmntinfo_r_np(&mounts, MNT_NOWAIT);
+    if (!count) return errno ? errno : EIO;
+    int result = ENOENT;
+    for (int i = 0; i < count; ++i) {
+        const struct statfs *m = &mounts[i];
+        if (strcmp(source, m->f_mntfromname)) continue;
+        result = EBUSY;
+        struct stat root;
+        if (strcmp(m->f_fstypename, "cd9660") || !(m->f_flags & MNT_RDONLY)) continue;
+        if (lstat(m->f_mntonname, &root)) { result = errno; break; }
+        if (!S_ISDIR(root.st_mode) || root.st_ino != (uint64_t)rootLBA * 2048) continue;
+        result = dm_mount_matches_type(m->f_mntonname, bsd, "cd9660");
+        if (!result && strlcpy(path, m->f_mntonname, capacity) >= capacity) result = ENAMETOOLONG;
+        break;
+    }
+    free(mounts);
+    return result;
 }
 int dm_mount_matches(const char *path, const char *bsd) {
     return dm_mount_matches_type(path, bsd, "cd9660");

@@ -27,7 +27,7 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
     private var panel: NSPanel?
     private var center: DRNotificationCenter?
     private var panelObserver: NSObjectProtocol?
-    private var taskID: UUID?
+    private(set) var taskID: UUID?
     private var failureDescription: String?
     private var observedDevice: DRDevice?
     private var requestedSpeed: Double?
@@ -52,7 +52,7 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
         guard !isBusy, let lease = coordinator.begin() else { return }
         self.lease = lease
         let id = diagnostics.startTask(kind: .dataBurn, media: .dvdPlusR,
-            driveModel: model, fileCount: fileCount, totalBytes: totalBytes)
+            driveModel: model, fileCount: fileCount, totalBytes: totalBytes, drivePath: request.drivePath)
         taskID = id; isBusy = true; progress = SystemTaskProgress(); actualSpeedKBps = nil
         firstDataVerificationObserved = false
         diagnostics.record(taskID: id, event: .preparing,
@@ -119,7 +119,7 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
         case .cocoa: domain = NSCocoaErrorDomain
         default: domain = "DiscMate"
         }
-        diagnostics.record(taskID: id, event: event, progress: update.fraction,
+        diagnostics.record(taskID: id, event: update.operationEvent ?? event, progress: update.fraction,
             error: update.errorSource == .discRecording ? nil : update.errorCode.map { NSError(domain: domain, code: Int($0)) },
             backendError: update.errorSource == .discRecording ? update.errorCode.map { ["DRErrorStatusErrorKey": $0] } : nil,
             evidence: update.evidence)
@@ -132,7 +132,7 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
         guard !isBusy, let lease = coordinator.begin() else { return }
         self.lease = lease; self.requireRecovery = requireRecovery
         taskID = diagnostics.startTask(kind: kind, media: media, driveModel: model,
-                                                        fileCount: fileCount, totalBytes: totalBytes)
+                                                        fileCount: fileCount, totalBytes: totalBytes, drivePath: preflight.drivePath)
         guard let panel = DMCreateBurnProgressPanel(), Self.hasProgressIndicator(panel.contentView) else {
             recordStartupFailure(.panelCreationFailed)
             message = "无法加载系统刻录进度窗口，未开始写入。"; return
@@ -186,7 +186,7 @@ final class SystemDiscTaskModel: NSObject, ObservableObject {
                     requireRecovery: @escaping @MainActor (String) -> Void = { _ in }) {
         guard !isBusy, let lease = coordinator.begin() else { return }
         self.lease = lease; self.requireRecovery = requireRecovery
-        taskID = diagnostics.startTask(kind: .erase, media: media, driveModel: model)
+        taskID = diagnostics.startTask(kind: .erase, media: media, driveModel: model, drivePath: preflight.drivePath)
         guard let panel = DMCreateEraseProgressPanel(), Self.hasProgressIndicator(panel.contentView) else {
             recordStartupFailure(.panelCreationFailed)
             message = "无法加载系统擦除进度窗口，未开始擦除。"; return

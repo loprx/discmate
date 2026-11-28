@@ -12,7 +12,13 @@ final class DiscEjectService {
     }
     deinit { DASessionSetDispatchQueue(session, nil) }
 
-    func eject(_ identity: MediaIdentity, drivePath: String, expectedDriveID: UInt64? = nil, progress: (String) -> Void) async throws {
+    func eject(_ identity: MediaIdentity, drivePath: String, expectedDriveID: UInt64? = nil, trace: (DiagnosticEventKind, NSError?) -> Void = { _, _ in },
+               progress: (String) -> Void) async throws {
+        func traced(_ start: DiagnosticEventKind, _ returned: DiagnosticEventKind, _ operation: () async throws -> Void) async throws {
+            trace(start, nil)
+            do { try await operation() } catch { trace(returned, error as NSError); throw error }
+            trace(returned, nil)
+        }
         try identity.validate()
         var driveID: UInt64 = 0
         try checkSystem(dm_registry_identity(drivePath, &driveID), "确认光驱身份")
@@ -25,14 +31,34 @@ final class DiscEjectService {
             throw DiscFailure("未找到已识别的整张光盘。")
         }
         progress("请求系统正常卸载整张光盘；未使用强制选项。")
-        try await request(disk, eject: false)
+        try await traced(.unmountRequested, .unmountReturned) { try await request(disk, eject: false) }
         try identity.validate()
+        var mountedPath = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        let mounted = dm_session_mount_for_eject(identity.bsd, &mountedPath, mountedPath.count)
+        if mounted == 0 {
+            progress("系统卸载后会话目录仍在。请允许助手正常卸载后推出。")
+            guard let contents = Bundle.main.executableURL?.deletingLastPathComponent().deletingLastPathComponent() else {
+                throw DiscFailure("无法定位会话卸载助手。")
+            }
+            let helper = contents.appendingPathComponent("Helpers/DiscMateMount").path
+            try await traced(.helperUnmountRequested, .helperUnmountReturned) {
+                try await Task.detached {
+                    try identity.validate()
+                    try MountAuthorization(helper: helper).unmountSession(identity)
+                }.value
+            }
+            try identity.validate()
+            let remaining = dm_session_mount_for_eject(identity.bsd, &mountedPath, mountedPath.count)
+            if remaining != ENOENT { try checkSystem(remaining == 0 ? EBUSY : remaining, "核对光盘卸载结果") }
+        } else if mounted != ENOENT {
+            try checkSystem(mounted, "检查仍占用光盘的挂载")
+        }
         var current: UInt64 = 0
         guard dm_registry_identity(drivePath, &current) == 0, current == driveID else {
             throw BurnRecoveryRequired(detail: "卸载后光驱身份变化，未继续推出。")
         }
         progress("正常卸载回调成功；请求一次系统正常推出。")
-        try await request(disk, eject: true)
+        try await traced(.ejectRequested, .ejectReturned) { try await request(disk, eject: true) }
         progress("推出回调成功，正在交叉核对注册表介质移除；尚需确认实际托盘。")
         let deadline = ProcessInfo.processInfo.systemUptime + 30
         var absentSince: TimeInterval?

@@ -27,8 +27,50 @@ enum DiagnosticReportTests {
         }
     }
 
+    private static func checkUSBReports() async throws {
+        for coverage in [USBTaskDiagnostics.Coverage.observed, .noMatchingVisibleEvents, .unavailable] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let store = DiagnosticReportStore(directory: directory) { _, start, _ in
+                var usb = USBTaskDiagnostics(topology: .hub, coverage: .noMatchingVisibleEvents)
+                usb.observe("@87654321 (transaction error)", at: start, port: "@12345678")
+                if coverage == .observed {
+                    usb.observe("@12345678 (transaction error)", at: start, port: "@12345678")
+                    usb.observe("@12345678 hardware connection lost", at: start.addingTimeInterval(0.215), port: "@12345678")
+                } else if coverage == .unavailable {
+                    usb.coverage = coverage
+                    usb.queryErrorCode = 10
+                }
+                return usb
+            }
+            let id = store.startTask(kind: .append, drivePath: "fixture")
+            store.record(taskID: id, event: .deviceUnavailable)
+            store.record(taskID: id, event: .failed)
+            store.finish(taskID: id, outcome: .failed)
+            for _ in 0..<100 {
+                if await store.reports().first?.usb?.coverage != .pending { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            let restored = DiagnosticReportStore(directory: directory)
+            let data = try await restored.exportData(taskID: id)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let report = try decoder.decode(DiagnosticReport.self, from: data)
+            precondition(report.firstAnomaly?.kind == .deviceUnavailable && report.lastAnomaly?.kind == .failed)
+            precondition(report.lastAnomaly?.unixMilliseconds != nil)
+            guard let usb = report.usb else { preconditionFailure("missing USB evidence") }
+            precondition(usb.coverage == coverage && !usb.voltageMeasured)
+            if coverage == .observed {
+                precondition(usb.samples.map(\.signal) == [.transactionError, .disconnected])
+                precondition(usb.samples[1].firstUnixMs - usb.samples[0].firstUnixMs == 215)
+            } else { precondition(usb.samples.isEmpty) }
+            precondition(!String(decoding: data, as: UTF8.self).contains("@12345678"))
+        }
+    }
+
     static func run() async throws {
         try await checkCloseReports()
+        try await checkUSBReports()
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("discmate-diagnostics-tests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

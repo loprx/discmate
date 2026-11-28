@@ -1,6 +1,6 @@
 # DiscMate
 
-DiscMate 是面向 Apple Silicon Mac 的免费光盘刻录工具。核心功能是在仍可追加的数据 DVD+R 上加入新文件，让新旧文件都能从最新会话读取。当前稳定版为 0.5.0，适用于 Apple Silicon Mac。
+DiscMate 是面向 Apple Silicon Mac 的免费光盘刻录工具。核心功能是在仍可追加的数据 DVD+R 上加入新文件，让新旧文件都能从最新会话读取。当前稳定版为 0.5.1，适用于 Apple Silicon Mac。
 
 ## 安装与更新
 
@@ -22,6 +22,10 @@ brew upgrade --cask loprx/tap/discmate
 ```
 
 当前下载包采用 ad hoc 签名，没有经过 Apple 公证。通过上面的 Homebrew cask 安装时，cask 会清除安装包上的隔离标记（`com.apple.quarantine`），因此首次打开无需再手动放行；这个步骤只作用于已安装的 DiscMate.app，不修改 Gatekeeper 或其他系统安全设置。若你手动下载 ZIP 后自行解压，首次打开可能提示“Apple 无法验证”，可先确认来源可信，再按 [Apple 的单应用放行步骤](https://support.apple.com/102445) 到「系统设置 → 隐私与安全性 → 仍要打开」操作，或对该副本执行 `xattr -dr com.apple.quarantine /Applications/DiscMate.app`。
+
+## 0.5.1
+
+刻录诊断报告按毫秒记录任务阶段，并汇总同一光驱端口的 USB 传输错误、断连和重新枚举。点「导出脱敏诊断日志」即可查看。报告会标明系统日志的采集状态，设备电压仍需独立测量。
 
 ## 0.5.0
 

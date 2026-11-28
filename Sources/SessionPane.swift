@@ -33,7 +33,7 @@ struct SessionPane: View {
                                 .foregroundStyle(.orange)
                         } else { Text(writeState.title).foregroundStyle(.secondary) }
                     } else {
-                        Text("盘上文件：等待识别光盘")
+                        Text(model.unsupportedFilesystem == nil ? "盘上文件：等待识别光盘" : "盘上文件：请在访达中浏览")
                         Spacer()
                         Text("剩余空间待识别").foregroundStyle(.secondary)
                     }
@@ -67,7 +67,7 @@ struct SessionPane: View {
                             }
                         }
                     } else {
-                        Text("放入已有数据的光盘后，这里显示盘上文件；空白盘或无盘时列表为空。")
+                        Text(model.unsupportedFilesystem == nil ? "放入已有数据的光盘后，这里显示盘上文件；空白盘或无盘时列表为空。" : "点击下方“在访达打开当前 UDF 光盘”浏览系统已挂载的目录。")
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, minHeight: 82, alignment: .center)
                     }
@@ -146,7 +146,7 @@ struct SessionPane: View {
                                 .help("在访达显示已确认的挂载目录，通常立即完成；不重新挂载、不校验。")
                         }
                         Text(model.snapshot.map { "DVD+R · \($0.filesystemLabel) · 最新会话 \($0.latest.session)" }
-                             ?? (model.unsupportedFilesystem == .udf102 ? "DVD+R · UDF 1.02 · 追加待支持" : "盘型与会话待识别"))
+                             ?? (model.unsupportedFilesystem != nil ? "DVD+R · UDF · 当前布局仅支持浏览" : "盘型与会话待识别"))
                             .font(.caption).foregroundStyle(.secondary)
                     }.padding(.top, 8)
                 }

@@ -4,6 +4,25 @@ import Darwin
 /// Compare a read-only mount with the scanned session without reading payload.
 /// Root names alone cannot distinguish two sessions with different children.
 enum MountedSessionDirectory {
+    static func validateISO(root: URL, snapshot: SessionSnapshot) throws {
+        var entries = Dictionary(uniqueKeysWithValues: snapshot.treeEntries.map { ($0.name, $0) })
+        if let bridge = snapshot.bridge, snapshot.volume?.joliet == false {
+            // The kernel may preserve primary ISO identifier case. Only accept
+            // aliases already bound to the same extent by the bridge reader.
+            let names = Set(try FileManager.default.contentsOfDirectory(atPath: root.path))
+            for entry in snapshot.treeEntries where !names.contains(entry.name) {
+                guard let raw = bridge.primaryIDs[entry.lba],
+                      var alias = String(data: raw, encoding: .ascii) else { continue }
+                if alias.hasSuffix(";1") { alias.removeLast(2) }
+                guard alias.lowercased() == entry.name, names.contains(alias),
+                      entries[alias] == nil else { continue }
+                entries.removeValue(forKey: entry.name)
+                entries[alias] = entry
+            }
+        }
+        try validate(root: root, entries: entries)
+    }
+
     static func validate(root: URL, entries: [String: ISOEntry]) throws {
         guard entries.count <= 10000 else { throw DiscFailure("挂载目录项目过多，无法核对。") }
         var children: [String: Set<String>] = ["": []]

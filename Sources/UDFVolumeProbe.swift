@@ -7,6 +7,9 @@ struct UDFAppendUnsupported: LocalizedError, CustomNSError {
     var errorCode: Int { 1001 }
     var errorDescription: String? {
         let version = String(format: "%x.%02x", revision >> 8, revision & 0xff)
+        if partitionMapType == 2 {
+            return "这张 UDF \(version) 光盘使用虚拟分区（VAT）。可在访达浏览当前挂载的文件；DiscMate 尚不支持追加到这种分区。"
+        }
         return "检测到 UDF \(version) 光盘（分区映射类型 \(partitionMapType)）；当前版本不能安全导入这张盘的目录或分配方式。本次未写盘。"
     }
 }
@@ -23,7 +26,7 @@ struct UDFVolumeProbe: Sendable {
     let fileSetBlock: UInt32
     let label: String?
 
-    static func inspect(sessionStart: UInt32, capacityBlocks: UInt64, allowISOBridge: Bool = false,
+    static func inspect(sessionStart: UInt32, capacityBlocks: UInt64, allowISOBridge: Bool = false, allowVAT: Bool = false,
                         readSector: (UInt32) throws -> Data) throws -> UDFVolumeProbe {
         func sector(_ offset: UInt32) throws -> Data {
             let address = UInt64(sessionStart) + UInt64(offset)
@@ -79,14 +82,21 @@ struct UDFVolumeProbe: Sendable {
             throw DiscFailure("UDF 域或分区映射无效。")
         }
         let mapType = logical[440]
+        // Physical map followed by the registered UDF virtual partition map.
+        let virtual = mapCount == 2 && mapLength == 70 && mapType == 1 && logical[441] == 6 &&
+           logical[446] == 2 && logical[447] == 64 &&
+           logical[451..<474] == Data("*UDF Virtual Partition".utf8) + Data(repeating: 0, count: 1)
+        if virtual && !(allowVAT && number16(logical, 240) == 0x0201 && number16(logical, 482) == 1 && number16(logical, 484) == number16(partition, 22)) {
+            throw UDFAppendUnsupported(revision: number16(logical, 240), partitionMapType: 2)
+        }
         let start = number32(partition, 188), blocks = number32(partition, 192)
         guard number32(logical, 212) == 2048, blocks > 0,
               UInt64(start) + UInt64(blocks) <= capacityBlocks else {
             throw DiscFailure("UDF 块大小或分区范围不受支持。")
         }
-        guard mapCount == 1, mapLength == 6, mapType == 1, logical[441] == 6,
+        guard (virtual || (mapCount == 1 && mapLength == 6)), mapType == 1, logical[441] == 6,
               number16(logical, 442) == 1, number16(logical, 444) == number16(partition, 22),
-              number32(logical, 248) >= 2048, number16(logical, 256) == number16(partition, 22),
+              number32(logical, 248) >= 2048, number16(logical, 256) == (virtual ? 1 : number16(partition, 22)),
               number32(logical, 252) < blocks else {
             throw DiscFailure("当前 UDF 分区映射无法安全定位文件目录。")
         }
@@ -96,7 +106,7 @@ struct UDFVolumeProbe: Sendable {
             label = String(data: logical[85..<(84 + nameLength)], encoding: logical[84] == 8 ? .isoLatin1 : .utf16BigEndian)
         } else { label = nil }
         return UDFVolumeProbe(revision: number16(logical, 240), blockBytes: 2048,
-                              partitionMapType: mapType, partitionStart: start, partitionBlocks: blocks,
+                              partitionMapType: virtual ? 2 : mapType, partitionStart: start, partitionBlocks: blocks,
                               partitionNumber: number16(partition, 22), fileSetBlock: number32(logical, 252), label: label)
     }
 

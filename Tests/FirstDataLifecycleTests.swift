@@ -19,7 +19,46 @@ struct FirstDataLifecycleTests {
         }
         preconditionFailure("async task did not reach expected state")
     }
+    @MainActor static func checkAppendWriter() async throws {
+        final class OfflineWriter: AppendWriter {
+            var operations: [String] = []
+            func confirmation(_ request: AppendWriteRequest, rates: [Double]) -> (title: String, detail: String) {
+                operations.append("confirm")
+                return ("offline", request.prepared.imageSHA256)
+            }
+            @MainActor func write(_ request: AppendWriteRequest, event: (AppendWriteEvent) -> Void) async throws -> AppendWriteOutcome {
+                operations.append("write")
+                event(.readingBack)
+                throw BurnRecoveryRequired(detail: request.prepared.imageSHA256)
+            }
+        }
+        let track = RecordedTrack(number: 1, session: 1, start: 0, blocks: 20, blank: false,
+                                  damaged: false, nextWritable: nil, freeBlocks: 0)
+        var snapshot = SessionSnapshot(identity: .init(bsd: "offline", registryID: 0, bytes: 0),
+            tracks: [track], latest: track, volume: nil, rootEntries: [], descriptorHash: "", appendable: false)
+        precondition(AppendWriters.select(snapshot) is DiscRecordingAppendWriter)
+        snapshot.reservedTrack = track
+        precondition(AppendWriters.select(snapshot) is ReservedTrackWriter)
+        let image = PreparedIncrementalISO(image: URL(fileURLWithPath: "/offline-only/image"),
+            proof: AppendProof(previousSession: 1, expectedStart: 20, files: []), imageBytes: 2048,
+            referencedBytes: 0, imageSHA256: "offline-image")
+        let request = AppendWriteRequest(snapshot: snapshot, prepared: image, drivePath: nil, speed: .reduced, verify: false)
+        let writer = OfflineWriter()
+        var selections = 0, events = 0
+        let operation = AppendWriteOperation(request) { _ in selections += 1; return writer }
+        precondition(operation.confirmation(rates: []).detail == image.imageSHA256)
+        do {
+            _ = try await operation.write { if case .readingBack = $0 { events += 1 } }
+            preconditionFailure("backend failure was lost")
+        } catch let failure as BurnRecoveryRequired {
+            precondition(failure.detail == image.imageSHA256)
+        }
+        precondition(selections == 1 && writer.operations == ["confirm", "write"] && events == 1)
+        print("PASS replaceable append writer: bound once, confirmed target, delivered progress and recovery error")
+    }
+
     @MainActor static func main() async throws {
+        try await checkAppendWriter()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("discmate-native-test-\(UUID())")
         let store = DiagnosticReportStore(directory: directory, appVersion: "test", appBuild: "4")
         let request = FirstDataBurnRequest(drivePath: "offline", driveID: 1, mediaID: 2, bsd: "offline",

@@ -1,7 +1,16 @@
 import Foundation
 
-enum UDFVolumeProbeTests {
+enum UDFVolumeProbeTests: UDFEncoding {
     static func run() throws {
+        let first = UDFRecordedExtent(lba: 100, bytes: 0x3fff_f800)
+        func joined(_ firstExtent: UDFRecordedExtent, _ next: UInt32) -> UDFRecordedExtent? {
+            UDFRecordedEntry(path: "large.zip", directory: false, bytes: UInt64(firstExtent.bytes) + 17,
+                extents: [firstExtent, .init(lba: next, bytes: 17)]).contiguousExtent
+        }
+        let second = first.lba + first.bytes / 2048
+        precondition(joined(first, second) == .init(lba: 100, bytes: first.bytes + 17))
+        precondition(joined(first, second + 1) == nil && joined(first, second - 1) == nil)
+        precondition(joined(.init(lba: 100, bytes: 2047), 101) == nil)
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("discmate-udf-probe-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -50,6 +59,30 @@ enum UDFVolumeProbeTests {
         combined.append(newBlocks)
         let latest = try UDFVolumeProbe.inspect(sessionStart: start, capacityBlocks: UInt64(combined.count / 2048)) {
             try read($0, from: combined)
+        }
+        // Reproduce a later session whose anchor refers to the first VDS.
+        do {
+            _ = try UDFVolumeProbe.inspect(sessionStart: start, capacityBlocks: UInt64(combined.count / 2048)) { sector in
+                if sector == start + 256 {
+                    var anchor = try read(256, from: bytes)
+                    retag(&anchor, location: sector)
+                    return anchor
+                }
+                var block = try read(sector, from: combined)
+                if sector < start, get16(block, 0) == 6 {
+                    put16(&block, 240, 0x0201)
+                    put32(&block, 264, 70)
+                    put32(&block, 268, 2)
+                    block[446] = 2
+                    block[447] = 64
+                    block.replaceSubrange(451..<474, with: Data("*UDF Virtual Partition".utf8) + [0])
+                    retag(&block, location: sector, crcLength: 494)
+                }
+                return block
+            }
+            fatalError("VAT volume accepted by physical partition writer")
+        } catch let error as UDFAppendUnsupported {
+            precondition(error.revision == 0x0201 && error.partitionMapType == 2)
         }
         let after = try UDFDirectoryReader.entries(volume: latest, capacityBlocks: UInt64(combined.count / 2048)) {
             try read($0, from: combined)
